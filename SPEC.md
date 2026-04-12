@@ -1,6 +1,7 @@
 # Playback Speed Control — SPEC
 
 ## Status
+
 Working specification compiled from decisions made so far in this conversation.
 
 ---
@@ -23,6 +24,7 @@ The design goal is **not** to copy existing extensions. It is to build a cleaner
 ## 2. Product Goals
 
 ### Primary goals
+
 1. **Firefox-first reliability**
 2. **Minimal, clean implementation**
 3. **Good compatibility with standard web media players**
@@ -32,7 +34,9 @@ The design goal is **not** to copy existing extensions. It is to build a cleaner
 7. **Simple persistence model**
 
 ### Practical compatibility target
+
 The extension should work with:
+
 - standard HTML5 `<video>` elements
 - standard HTML5 `<audio>` elements when audio support is enabled
 - dynamically inserted media elements
@@ -40,9 +44,11 @@ The extension should work with:
 - iframes/frames where extension injection is allowed
 
 ### Explicit non-goal
+
 Do **not** promise support for literally every player implementation on the web.
 
 Support is **best effort** for:
+
 - heavily customized players
 - unusual iframe structures
 - sites that rely on page-world internals
@@ -53,6 +59,7 @@ Support is **best effort** for:
 ## 3. Product Scope
 
 ### In scope for v1
+
 - set playback speed
 - increase/decrease speed via shortcut or popup
 - reset speed to `1x`
@@ -68,6 +75,7 @@ Support is **best effort** for:
 - optional per-site saved speed behavior
 
 ### Out of scope for v1
+
 - visual effects
 - volume boost
 - pitch manipulation
@@ -84,16 +92,20 @@ Support is **best effort** for:
 ## 4. UX / UI Decisions
 
 ## 4.1 Main UI model
+
 The **main user interface** should be the **extension popup** opened from the toolbar icon.
 
 The popup should have:
+
 - a **default compact view** for the most common actions
 - an **expanded settings view** inside the same popup
 - clean, clear UI/UX
 - no separate options page in v1 unless implementation constraints make it necessary later
 
 ### Compact/default popup view
+
 Should expose only the high-frequency controls:
+
 - current detected speed
 - speed up
 - speed down
@@ -103,7 +115,9 @@ Should expose only the high-frequency controls:
 - optional audio toggle shortcut/access if needed
 
 ### Expanded/settings popup view
+
 Should expose:
+
 - keyboard shortcut mapping/config
 - preferred/default speed
 - remember last speed toggle
@@ -115,36 +129,46 @@ Should expose:
 - any additional minimal settings that directly support playback speed behavior
 
 ### UI principle
+
 The popup should feel like:
+
 - minimal first
 - settings second
 - everything in one place
 - no unnecessary pages or navigation layers
 
 ## 4.2 Popup persistence / pinning
+
 Desired by user, but **not selected for v1 as a native extension-popup behavior**.
 
 Reason:
+
 - standard extension popups auto-close when the user clicks outside them
 - a true persistent/pinned popup would require a different UI mode than a normal toolbar popup
 
 ### Selected handling for v1
+
 - popup remains a normal extension popup
 - compact view + expanded settings live inside the same popup
 
 ### Deferred alternative
+
 If persistent inspector-style UI is needed later, evaluate a separate dedicated extension page/window/panel mode.
 
 ## 4.3 User feedback model
+
 ### Selected
+
 1. **Toolbar badge** shows current speed for the active tab when eligible media is present
 2. **Popup** shows current speed and controls
 3. **Optional transient toast** provides on-page feedback when a shortcut changes speed
 
 ### Rejected for v1
+
 - permanent floating on-page controller as default behavior
 
 Reason:
+
 - it adds DOM/CSS/z-index/event-surface complexity
 - it is a common source of site conflicts
 - it is not required if badge + popup + optional toast cover feedback well
@@ -154,7 +178,9 @@ Reason:
 ## 5. Functional Requirements
 
 ## 5.1 Core speed behavior
+
 The extension must support:
+
 - increase speed by configured increment
 - decrease speed by configured increment
 - set exact preferred/default speed
@@ -162,57 +188,73 @@ The extension must support:
 - apply remembered speed when configured
 
 ### Default assumptions
-Initial default values may start as:
+
+Initial default values are:
+
 - speed step: `0.1`
 - reset speed: `1.0`
 - preferred/default speed: `1.0`
+- auto-restore speed on new media: enabled
 
 These are defaults only, not hard-coded constraints.
 
 ## 5.2 Persistence
+
 The extension must support these distinct persistence behaviors:
 
 ### Preferred/default speed
+
 A user-defined preferred speed that acts as the default chosen speed.
 
 ### Remember last used speed
+
 Store the last applied speed for reuse when enabled.
 
 ### Save scope
+
 The user should be able to choose whether saved speed behavior is:
+
 - **global**
 - **per-site**
 
 If per-site mode is enabled, saved speed should be stored and applied based on the current site.
 
 ### Force/apply saved speed on load
+
 Optional setting to actively re-apply the remembered/preferred speed on media load, for sites that override playback speed.
 
 Important distinction:
+
 - **remember last speed** = save the last used value
 - **save scope** = global or per-site
 - **force/apply on load** = actively re-apply speed when new media is initialized or a site resets it
 
 ## 5.3 Audio support
+
 Audio should be supported only when explicitly enabled.
 
 Rationale:
+
 - main project focus is video
 - audio support is useful but secondary
 - keeping audio optional reduces accidental impact
 
 ## 5.4 Disabled sites
+
 The extension must allow users to disable it on selected sites.
 
 v1 behavior:
+
 - store disabled site rules as user-managed entries
 - support one entry per line
 - keep matching simple and understandable
 
 ### Selected v1 rule model
+
 Start with **simple host/domain entries only**.
 
 Examples:
+
 - `youtube.com`
 - `www.youtube.com`
 - `m.youtube.com`
@@ -221,18 +263,24 @@ Examples:
 This means v1 does **not** start with wildcard patterns, regex, or advanced URL syntax.
 
 ## 5.5 Keyboard shortcuts
+
 Keyboard shortcuts are required.
 
 Required actions:
+
 - increase speed
 - decrease speed
 - reset speed
 - apply preferred/default speed
 - optional toggle toast if later useful
 
+Initial default shortcut values:
+- increase speed: `d`
+- decrease speed: `s`
+
 ### Important behavior rule
-Shortcuts must not operate on an undefined target.
-The extension needs a deterministic target-selection strategy.
+
+Shortcuts must not operate on an undefined target. The extension needs a deterministic target-selection strategy.
 
 ---
 
@@ -241,6 +289,7 @@ The extension needs a deterministic target-selection strategy.
 A major source of bugs in existing extensions is ambiguous targeting when a page contains multiple media elements.
 
 ### Selected targeting strategy for v1
+
 When the user changes speed, target media in this order:
 
 1. **Last interacted eligible media element** in the current tab/frame
@@ -249,10 +298,12 @@ When the user changes speed, target media in this order:
 4. Otherwise, the **first eligible media element** discovered in the page/frame
 
 ### Eligible media element
+
 - `<video>` always eligible
 - `<audio>` eligible only when audio support is enabled
 
 ### Requirements
+
 - media discovery must update as the page changes
 - dynamically inserted elements must be tracked
 - stale references must be cleaned up
@@ -262,28 +313,35 @@ When the user changes speed, target media in this order:
 ## 7. Compatibility Strategy
 
 ## 7.1 Supported path
+
 The core implementation should target **reachable standard media elements**.
 
 That means v1 should primarily operate through standard media APIs on discovered media elements.
 
 ## 7.2 Best-effort path
+
 Best-effort compatibility includes:
+
 - custom players wrapping standard media elements
 - media inserted after initial load
 - shadow-DOM-contained media where reachable
 - frames where extension injection is allowed
 
 ## 7.3 Not guaranteed
+
 Not guaranteed in v1:
+
 - every custom player on the web
 - every page-world-only player setup
 - every unusual embedded/third-party player architecture
 - deep site-specific compatibility fixes
 
 ## 7.4 Policy on page-specific hacks
+
 Do not start with a large library of site-specific hacks.
 
 Preferred order:
+
 1. standards-based implementation
 2. robust media detection
 3. clean fallback behavior
@@ -296,6 +354,7 @@ Preferred order:
 The extension should remain lightweight and avoid the common pattern of turning a simple utility into a heavy runtime layer.
 
 ### Requirements
+
 - very small content-script bootstrap
 - no constant polling
 - use event-driven updates where possible
@@ -307,6 +366,7 @@ The extension should remain lightweight and avoid the common pattern of turning 
 - keep popup logic isolated from page logic
 
 ### Principle
+
 This should behave like a focused utility, not a mini app injected into every page.
 
 ---
@@ -314,6 +374,7 @@ This should behave like a focused utility, not a mini app injected into every pa
 ## 9. Architecture
 
 ## 9.1 Stack
+
 - **WXT**
 - **TypeScript**
 - **React**
@@ -321,15 +382,20 @@ This should behave like a focused utility, not a mini app injected into every pa
 - one codebase, with browser portability as a secondary benefit rather than the initial product goal
 
 ## 9.2 Main parts
+
 ### A. Background/runtime layer
+
 Responsibilities:
+
 - manage extension-level state
 - manage toolbar badge updates
 - coordinate tab-specific state
 - handle extension commands and messaging
 
 ### B. Content script layer
+
 Responsibilities:
+
 - discover eligible media elements
 - observe dynamic page changes
 - apply speed changes to target media
@@ -337,7 +403,9 @@ Responsibilities:
 - optionally show transient toast feedback
 
 ### C. Popup UI layer
+
 Responsibilities:
+
 - compact control view
 - expanded settings view
 - read/update settings
@@ -345,7 +413,9 @@ Responsibilities:
 - allow per-site enable/disable action
 
 ### D. Shared domain modules
+
 Suggested modules:
+
 - `settings`
 - `siteRules`
 - `mediaRegistry`
@@ -395,6 +465,7 @@ The exact WXT entrypoint layout can be adjusted to the generated template, but t
 ## 11. Settings Model
 
 ### Selected settings for v1
+
 - extension enabled
 - preferred/default speed
 - speed increment step
@@ -407,6 +478,7 @@ The exact WXT entrypoint layout can be adjusted to the generated template, but t
 - shortcut mappings
 
 ### Suggested stored shapes
+
 ```ts
 interface AppSettings {
   enabled: boolean;
@@ -432,14 +504,15 @@ interface SitePlaybackState {
 ```
 
 ### State model rule
-Keep storage intentionally simple.
-Do not introduce complex inheritance/state layers in v1.
+
+Keep storage intentionally simple. Do not introduce complex inheritance/state layers in v1.
 
 ---
 
 ## 12. Badge Behavior
 
 ### Selected behavior
+
 - toolbar badge displays current effective speed for the active tab when eligible media is present
 - if no eligible media is detected, do not show the speed number on the icon
 - badge should update when:
@@ -449,7 +522,9 @@ Do not introduce complex inheritance/state layers in v1.
   - navigation invalidates previous state
 
 ### Display guidance
+
 Badge text should stay short and readable, such as:
+
 - `1x`
 - `1.5`
 - `2x`
@@ -461,12 +536,15 @@ Avoid overloading the badge with extra meaning.
 ## 13. Toast Behavior
 
 ### Status
+
 Selected as **optional**, but **enabled by default**.
 
 ### Purpose
+
 Provide immediate feedback when speed changes via keyboard shortcuts.
 
 ### Requirements
+
 - small
 - transient
 - non-interactive
@@ -478,6 +556,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 - easy to disable
 
 ### Example content
+
 - `1.25x`
 - `1.5x`
 - `Reset to 1x`
@@ -487,6 +566,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 ## 14. Popup UX Specification
 
 ## 14.1 Compact view contents
+
 - current speed display
 - minus/decrease action
 - plus/increase action
@@ -496,6 +576,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 - entry to expand settings
 
 ## 14.2 Expanded settings contents
+
 - preferred speed input
 - step size input
 - remember last speed toggle
@@ -507,6 +588,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 - shortcut editor
 
 ## 14.3 UX rules
+
 - compact view should satisfy most daily use without expansion
 - settings should remain understandable at a glance
 - minimize jargon in user-facing labels
@@ -520,6 +602,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 The implementation should intentionally avoid the known failure categories seen in similar projects.
 
 ### Must avoid where possible
+
 - overlay UI conflicts with page layout
 - ambiguous target media selection
 - overly broad feature surface
@@ -531,6 +614,7 @@ The implementation should intentionally avoid the known failure categories seen 
 - shortcut behavior that silently targets the wrong element
 
 ### Design principle
+
 A smaller correct feature set is better than a broader unstable one.
 
 ---
@@ -538,7 +622,9 @@ A smaller correct feature set is better than a broader unstable one.
 ## 16. Testing / Acceptance Criteria
 
 ## 16.1 Core acceptance criteria
+
 The extension is acceptable for v1 if it can reliably do the following:
+
 - change speed on standard HTML5 video players
 - remember and reapply saved speed when configured
 - support global or per-site saved speed behavior
@@ -550,7 +636,9 @@ The extension is acceptable for v1 if it can reliably do the following:
 - avoid noticeable performance degradation on normal browsing pages
 
 ## 16.2 Manual test matrix
+
 Minimum manual coverage should include:
+
 - single video page
 - page with multiple videos
 - page with audio only
@@ -568,6 +656,7 @@ Minimum manual coverage should include:
 These are not rejected permanently, but are intentionally deferred.
 
 ### Deferred
+
 - persistent/pinned inspector-style UI
 - separate options page
 - permanent floating controller
@@ -581,6 +670,7 @@ These are not rejected permanently, but are intentionally deferred.
 ## 18. Rejected for Current Scope
 
 ### Rejected
+
 - expanding into a broad media utility extension
 - adding unrelated playback features in v1
 - making the on-page floating controller part of the default interaction model

@@ -2,19 +2,19 @@ const TOAST_ID = "psc-toast";
 const TOAST_STYLE_ID = "psc-toast-style";
 
 function getStyleParent(): HTMLElement {
-  return document.head ?? document.documentElement;
+	return document.head ?? document.documentElement;
 }
 
 function getToastParent(): HTMLElement {
-  return document.body ?? document.documentElement;
+	return document.body ?? document.documentElement;
 }
 
 function ensureStyles(): void {
-  if (document.getElementById(TOAST_STYLE_ID)) return;
+	if (document.getElementById(TOAST_STYLE_ID)) return;
 
-  const style = document.createElement("style");
-  style.id = TOAST_STYLE_ID;
-  style.textContent = `
+	const style = document.createElement("style");
+	style.id = TOAST_STYLE_ID;
+	style.textContent = `
     #${TOAST_ID} {
       position: fixed;
       left: 18px;
@@ -48,33 +48,33 @@ function ensureStyles(): void {
     }
   `;
 
-  getStyleParent().appendChild(style);
+	getStyleParent().appendChild(style);
 }
 
 export class ToastController {
-  private element: HTMLDivElement | null = null;
-  private timeoutId: number | null = null;
+	private element: HTMLDivElement | null = null;
+	private timeoutId: number | null = null;
 
-  show(message: string): void {
-    ensureStyles();
+	show(message: string): void {
+		ensureStyles();
 
-    if (!this.element || !this.element.isConnected) {
-      this.element = document.createElement("div");
-      this.element.id = TOAST_ID;
-      getToastParent().appendChild(this.element);
-    }
+		if (!this.element || !this.element.isConnected) {
+			this.element = document.createElement("div");
+			this.element.id = TOAST_ID;
+			getToastParent().appendChild(this.element);
+		}
 
-    this.element.textContent = message;
-    this.element.dataset.visible = "true";
+		this.element.textContent = message;
+		this.element.dataset.visible = "true";
 
-    if (this.timeoutId !== null) {
-      window.clearTimeout(this.timeoutId);
-    }
+		if (this.timeoutId !== null) {
+			window.clearTimeout(this.timeoutId);
+		}
 
-    this.timeoutId = window.setTimeout(() => {
-      if (this.element) {
-        this.element.dataset.visible = "false";
-      }
-    }, 1100);
-  }
+		this.timeoutId = window.setTimeout(() => {
+			if (this.element) {
+				this.element.dataset.visible = "false";
+			}
+		}, 1100);
+	}
 }
