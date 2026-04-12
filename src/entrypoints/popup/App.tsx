@@ -1,7 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getSettings, updateSettings } from "@/core/settings";
+import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { normalizeRules } from "@/core/siteRules";
-import type { ContentRequestMessage, PopupState } from "@/types/messages";
+import type {
+	ApplyActionMessage,
+	ApplyExactSpeedMessage,
+	ApplyTabActionMessage,
+	ApplyTabExactSpeedMessage,
+	GetTabStateMessage,
+	PopupState,
+	TabStateChangedMessage,
+	TabStateResponse,
+} from "@/types/messages";
 import type { AppSettings } from "@/types/settings";
 import { DEFAULT_SETTINGS } from "@/types/settings";
 import { formatSpeed } from "@/utils/numbers";
@@ -17,49 +27,136 @@ interface PopupStatus {
 	unavailableReason: string | null;
 }
 
+function capitalize(value: string | null | undefined): string {
+	if (!value) return "";
+	return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 async function getActiveTab(): Promise<browser.Tabs.Tab | null> {
 	const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
 	return tab ?? null;
 }
 
-async function requestStateFromActiveTab(): Promise<PopupStatus> {
-	const tab = await getActiveTab();
-	const tabId = tab?.id ?? null;
-	const hostname = getHostnameFromUrl(tab?.url);
+async function withTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	fallback: T,
+): Promise<T> {
+	return await Promise.race([
+		promise,
+		new Promise<T>((resolve) =>
+			window.setTimeout(() => resolve(fallback), timeoutMs),
+		),
+	]);
+}
 
+async function requestTabState(tabId: number): Promise<PopupState | null> {
+	let bestState: PopupState | null = null;
+
+	try {
+		const directResponse = await withTimeout(
+			browser.tabs.sendMessage(
+				tabId,
+				{ type: "PSC_GET_STATE" },
+				{ frameId: 0 },
+			) as Promise<PopupState | null | undefined>,
+			700,
+			null,
+		);
+		bestState = pickBetterState(bestState, directResponse ?? null);
+	} catch {
+		// Fall through to background cache/fallback.
+	}
+
+	try {
+		const response = await withTimeout(
+			browser.runtime.sendMessage({
+				type: "PSC_GET_TAB_STATE",
+				payload: { tabId },
+			} satisfies GetTabStateMessage) as Promise<
+				TabStateResponse | null | undefined
+			>,
+			900,
+			null,
+		);
+		bestState = pickBetterState(bestState, response?.state ?? null);
+	} catch {
+		// Ignore background fallback failures.
+	}
+
+	return bestState;
+}
+
+async function requestPopupStatus(
+	tabId: number | null,
+	hostname: string,
+): Promise<PopupStatus> {
 	if (!tabId) {
 		return {
 			activeTabId: null,
 			hostname,
 			state: null,
-			unavailableReason: "No active tab",
+			unavailableReason: "No active tab.",
 		};
 	}
 
-	try {
-		const state = (await browser.tabs.sendMessage(tabId, {
-			type: "PSC_GET_STATE",
-		} satisfies ContentRequestMessage)) as PopupState;
-
-		return {
-			activeTabId: tabId,
-			hostname,
-			state,
-			unavailableReason: null,
-		};
-	} catch {
-		return {
-			activeTabId: tabId,
-			hostname,
-			state: null,
-			unavailableReason: "No controllable media was found in this tab yet.",
-		};
+	let state = await requestTabState(tabId);
+	if (getStateScore(state) < 100) {
+		await new Promise((resolve) => window.setTimeout(resolve, 200));
+		state = pickBetterState(state, await requestTabState(tabId));
 	}
+	if (getStateScore(state) < 100) {
+		await new Promise((resolve) => window.setTimeout(resolve, 600));
+		state = pickBetterState(state, await requestTabState(tabId));
+	}
+	if (getStateScore(state) < 100) {
+		await new Promise((resolve) => window.setTimeout(resolve, 1200));
+		state = pickBetterState(state, await requestTabState(tabId));
+	}
+
+	return {
+		activeTabId: tabId,
+		hostname: state?.hostname || hostname,
+		state,
+		unavailableReason: tabId ? null : "No active tab.",
+	};
 }
 
 function parseSpeedInput(input: string, fallback: number): number {
 	const parsed = Number(input);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getStateScore(state: PopupState | null | undefined): number {
+	if (!state) return -1;
+
+	let score = 0;
+	if (state.hasMedia) score += 100;
+	if (state.currentSpeed !== null) score += 10;
+	if (state.activeKind === "video") score += 5;
+	if (state.hostname) score += 1;
+	return score;
+}
+
+function pickBetterState(
+	current: PopupState | null,
+	candidate: PopupState | null,
+): PopupState | null {
+	return getStateScore(candidate) > getStateScore(current)
+		? candidate
+		: current;
+}
+
+function applyPopupState(
+	current: PopupStatus,
+	nextState: PopupState | null,
+): PopupStatus {
+	return {
+		...current,
+		hostname: nextState?.hostname || current.hostname,
+		state: nextState,
+		unavailableReason: nextState ? null : current.unavailableReason,
+	};
 }
 
 function App() {
@@ -72,27 +169,150 @@ function App() {
 	});
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [disabledSitesValue, setDisabledSitesValue] = useState("");
-	const [isReady, setIsReady] = useState(false);
-	const [isSendingAction, setIsSendingAction] = useState(false);
+	const activeTabIdRef = useRef<number | null>(null);
 
 	const displayedSpeed = useMemo(
-		() => popupStatus.state?.currentSpeed ?? settings.preferredSpeed,
-		[popupStatus.state?.currentSpeed, settings.preferredSpeed],
+		() => popupStatus.state?.currentSpeed ?? null,
+		[popupStatus.state?.currentSpeed],
 	);
 
 	useEffect(() => {
+		let isMounted = true;
+		let port: browser.Runtime.Port | null = null;
+		let retryTimer: number | null = null;
+		let handlePortMessage: ((message: unknown) => void) | null = null;
+
 		void (async () => {
-			const [loadedSettings, status] = await Promise.all([
+			const [loadedSettings, activeTab] = await Promise.all([
 				getSettings(),
-				requestStateFromActiveTab(),
+				getActiveTab(),
 			]);
+			if (!isMounted) return;
+
+			const activeTabId = activeTab?.id ?? null;
+			const hostname = getHostnameFromUrl(activeTab?.url);
+			activeTabIdRef.current = activeTabId;
 
 			setSettings(loadedSettings);
 			setDisabledSitesValue(loadedSettings.disabledSites.join("\n"));
+			setPopupStatus({
+				activeTabId,
+				hostname,
+				state: null,
+				unavailableReason: activeTabId ? null : "No active tab.",
+			});
+
+			port = browser.runtime.connect({ name: "psc-popup" });
+			handlePortMessage = (message: unknown) => {
+				const runtimeMessage = message as TabStateChangedMessage;
+				if (runtimeMessage?.type !== "PSC_TAB_STATE_CHANGED") return;
+				if (activeTabIdRef.current !== runtimeMessage.payload.tabId) return;
+
+				setPopupStatus((current) =>
+					applyPopupState(current, runtimeMessage.payload.state),
+				);
+			};
+			port.onMessage.addListener(handlePortMessage);
+
+			const status = await requestPopupStatus(activeTabId, hostname);
+			if (!isMounted) return;
 			setPopupStatus(status);
-			setIsReady(true);
+
+			if (activeTabId && !status.state) {
+				retryTimer = window.setTimeout(() => {
+					void requestPopupStatus(activeTabId, hostname).then((nextStatus) => {
+						if (!isMounted) return;
+						setPopupStatus((current) =>
+							current.activeTabId === nextStatus.activeTabId
+								? nextStatus
+								: current,
+						);
+					});
+				}, 500);
+			}
 		})();
+
+		return () => {
+			isMounted = false;
+			if (retryTimer !== null) {
+				window.clearTimeout(retryTimer);
+			}
+			if (port && handlePortMessage) {
+				port.onMessage.removeListener(handlePortMessage);
+				port.disconnect();
+			}
+		};
 	}, []);
+
+	const sendAction = async (
+		message: ApplyTabActionMessage | ApplyTabExactSpeedMessage,
+	) => {
+		const tabId = popupStatus.activeTabId;
+		if (!tabId) return;
+
+		try {
+			let response: PopupState | null = null;
+
+			if (message.type === "PSC_APPLY_TAB_ACTION") {
+				response = await withTimeout(
+					browser.tabs.sendMessage(
+						tabId,
+						{
+							type: "PSC_APPLY_ACTION",
+							payload: { action: message.payload.action },
+						} satisfies ApplyActionMessage,
+						{ frameId: 0 },
+					) as Promise<PopupState | null | undefined>,
+					800,
+					null,
+				);
+			} else {
+				response = await withTimeout(
+					browser.tabs.sendMessage(
+						tabId,
+						{
+							type: "PSC_APPLY_EXACT_SPEED",
+							payload: { speed: message.payload.speed },
+						} satisfies ApplyExactSpeedMessage,
+						{ frameId: 0 },
+					) as Promise<PopupState | null | undefined>,
+					800,
+					null,
+				);
+			}
+
+			setPopupStatus((current) =>
+				applyPopupState(current, response ?? current.state),
+			);
+		} catch {
+			const refreshedState = await requestTabState(tabId);
+			setPopupStatus((current) =>
+				applyPopupState(current, refreshedState ?? current.state),
+			);
+		}
+	};
+
+	useEffect(() => {
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (isEditableTarget(event.target)) return;
+			if (!popupStatus.activeTabId) return;
+
+			const action = matchShortcutAction(event, settings.shortcuts);
+			if (!action) return;
+
+			event.preventDefault();
+			event.stopPropagation();
+			void sendAction({
+				type: "PSC_APPLY_TAB_ACTION",
+				payload: { tabId: popupStatus.activeTabId, action },
+			} satisfies ApplyTabActionMessage);
+		};
+
+		window.addEventListener("keydown", handleKeydown, true);
+		return () => {
+			window.removeEventListener("keydown", handleKeydown, true);
+		};
+	}, [settings.shortcuts, popupStatus.activeTabId]);
 
 	const saveSettings = async (partial: Partial<AppSettings>) => {
 		const nextSettings = await updateSettings(partial);
@@ -100,40 +320,20 @@ function App() {
 		setDisabledSitesValue(nextSettings.disabledSites.join("\n"));
 	};
 
-	const sendAction = async (message: ContentRequestMessage) => {
-		if (!popupStatus.activeTabId) return;
-		setIsSendingAction(true);
-
-		try {
-			const state = (await browser.tabs.sendMessage(
-				popupStatus.activeTabId,
-				message,
-			)) as PopupState;
-			setPopupStatus((current) => ({
-				...current,
-				state,
-				unavailableReason: null,
-			}));
-		} catch {
-			setPopupStatus((current) => ({
-				...current,
-				state: null,
-				unavailableReason:
-					"This page is not currently exposing controllable media.",
-			}));
-		} finally {
-			setIsSendingAction(false);
-		}
-	};
-
 	const currentHostname =
-		popupStatus.hostname || popupStatus.state?.hostname || "";
+		popupStatus.state?.hostname || popupStatus.hostname || "";
 	const currentSiteDisabled = currentHostname
 		? settings.disabledSites.some(
 				(rule) =>
 					currentHostname === rule || currentHostname.endsWith(`.${rule}`),
 			)
 		: false;
+
+	const sourceLabel = popupStatus.state?.hasMedia
+		? [capitalize(popupStatus.state.activeKind) || "Media", currentHostname]
+				.filter(Boolean)
+				.join(" • ")
+		: "";
 
 	const toggleCurrentSite = async () => {
 		if (!currentHostname) return;
@@ -143,24 +343,13 @@ function App() {
 			: normalizeRules([...settings.disabledSites, currentHostname]);
 
 		await saveSettings({ disabledSites: nextRules });
-		const status = await requestStateFromActiveTab();
-		setPopupStatus(status);
 	};
-
-	if (!isReady) {
-		return (
-			<div className="popup-shell">
-				<div className="loading-state">Loading…</div>
-			</div>
-		);
-	}
 
 	return (
 		<div className="popup-shell">
 			<header className="popup-header">
 				<div>
 					<p className="eyebrow">Playback Speed Control</p>
-					<h1>Speed</h1>
 				</div>
 				<button
 					className="ghost-button"
@@ -171,22 +360,20 @@ function App() {
 				</button>
 			</header>
 
-			<section className="hero-card">
-				<div>
-					<p className="muted-label">Current speed</p>
-					<div className="speed-display">{formatSpeed(displayedSpeed)}</div>
-				</div>
-
-				<div className="hero-meta">
+			<section className="speed-strip">
+				<div className="speed-readout">
 					<span
-						className={`status-pill ${popupStatus.state?.hasMedia ? "is-active" : ""}`}
+						className="speed-value"
+						aria-label={
+							displayedSpeed === null
+								? "Current speed unavailable"
+								: `Current speed ${formatSpeed(displayedSpeed)}`
+						}
 					>
-						{popupStatus.state?.hasMedia
-							? (popupStatus.state?.activeKind ?? "media")
-							: "No media"}
+						{formatSpeed(displayedSpeed)}
 					</span>
-					{currentHostname ? (
-						<span className="hostname">{currentHostname}</span>
+					{sourceLabel ? (
+						<span className="speed-source">{sourceLabel}</span>
 					) : null}
 				</div>
 			</section>
@@ -196,52 +383,59 @@ function App() {
 					<button
 						className="control-button"
 						type="button"
-						disabled={isSendingAction}
-						onClick={() =>
+						disabled={!popupStatus.activeTabId}
+						onClick={() => {
+							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_ACTION",
-								payload: { action: "decrease" },
-							})
-						}
+								type: "PSC_APPLY_TAB_ACTION",
+								payload: { tabId: popupStatus.activeTabId, action: "decrease" },
+							} satisfies ApplyTabActionMessage);
+						}}
 					>
 						−
 					</button>
 					<button
 						className="control-button control-button-primary"
 						type="button"
-						disabled={isSendingAction}
-						onClick={() =>
+						disabled={!popupStatus.activeTabId}
+						onClick={() => {
+							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_ACTION",
-								payload: { action: "increase" },
-							})
-						}
+								type: "PSC_APPLY_TAB_ACTION",
+								payload: { tabId: popupStatus.activeTabId, action: "increase" },
+							} satisfies ApplyTabActionMessage);
+						}}
 					>
 						+
 					</button>
 					<button
 						className="control-button"
 						type="button"
-						disabled={isSendingAction}
-						onClick={() =>
+						disabled={!popupStatus.activeTabId}
+						onClick={() => {
+							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_ACTION",
-								payload: { action: "reset" },
-							})
-						}
+								type: "PSC_APPLY_TAB_ACTION",
+								payload: { tabId: popupStatus.activeTabId, action: "reset" },
+							} satisfies ApplyTabActionMessage);
+						}}
 					>
 						Reset
 					</button>
 					<button
 						className="control-button"
 						type="button"
-						disabled={isSendingAction}
-						onClick={() =>
+						disabled={!popupStatus.activeTabId}
+						onClick={() => {
+							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_ACTION",
-								payload: { action: "preferred" },
-							})
-						}
+								type: "PSC_APPLY_TAB_ACTION",
+								payload: {
+									tabId: popupStatus.activeTabId,
+									action: "preferred",
+								},
+							} satisfies ApplyTabActionMessage);
+						}}
 					>
 						Preferred
 					</button>
@@ -278,10 +472,6 @@ function App() {
 							: "Disable on this site"}
 					</button>
 				</div>
-
-				{popupStatus.unavailableReason ? (
-					<p className="hint-text">{popupStatus.unavailableReason}</p>
-				) : null}
 			</section>
 
 			{isExpanded ? (
@@ -323,14 +513,19 @@ function App() {
 										defaultValue={settings.preferredSpeed}
 										onKeyDown={(event) => {
 											if (event.key !== "Enter") return;
+											if (!popupStatus.activeTabId) return;
+
 											const nextSpeed = parseSpeedInput(
 												(event.currentTarget as HTMLInputElement).value,
 												settings.preferredSpeed,
 											);
 											void sendAction({
-												type: "PSC_APPLY_EXACT_SPEED",
-												payload: { speed: nextSpeed },
-											});
+												type: "PSC_APPLY_TAB_EXACT_SPEED",
+												payload: {
+													tabId: popupStatus.activeTabId,
+													speed: nextSpeed,
+												},
+											} satisfies ApplyTabExactSpeedMessage);
 										}}
 									/>
 									<span className="input-hint">Press Enter</span>
@@ -371,8 +566,8 @@ function App() {
 									})
 								}
 							>
-								<option value="site">Per site</option>
 								<option value="global">Global</option>
+								<option value="site">Per site</option>
 							</select>
 						</label>
 
@@ -380,8 +575,8 @@ function App() {
 							<div>
 								<strong>Auto-restore speed on new media</strong>
 								<p>
-									Reapply the saved or preferred speed when the site resets or
-									recreates media.
+									Reapply the saved or preferred speed when a new media element
+									loads.
 								</p>
 							</div>
 							<input
@@ -399,15 +594,13 @@ function App() {
 					<div className="settings-group">
 						<div className="section-heading">
 							<h3>Behavior</h3>
-							<span>Only enable the extra behaviors you actually want.</span>
+							<span>Keep the control surface focused and lightweight.</span>
 						</div>
 
 						<label className="toggle-row">
 							<div>
-								<strong>Audio support</strong>
-								<p>
-									Allow the extension to target audio elements as well as video.
-								</p>
+								<strong>Work on audio too</strong>
+								<p>Include standard HTML audio elements in targeting.</p>
 							</div>
 							<input
 								type="checkbox"
@@ -420,9 +613,9 @@ function App() {
 
 						<label className="toggle-row">
 							<div>
-								<strong>Shortcut toast</strong>
+								<strong>Show toast</strong>
 								<p>
-									Show a near-transparent confirmation after shortcut actions.
+									Display a subtle on-page toast after successful speed changes.
 								</p>
 							</div>
 							<input
@@ -438,33 +631,35 @@ function App() {
 					<div className="settings-group">
 						<div className="section-heading">
 							<h3>Disabled sites</h3>
-							<span>
-								Use one hostname per line. Simple host/domain entries only.
-							</span>
+							<span>One host or domain per line.</span>
 						</div>
-						<label className="field">
-							<span>Hostnames</span>
-							<textarea
-								rows={5}
-								value={disabledSitesValue}
-								onChange={(event) => setDisabledSitesValue(event.target.value)}
-								onBlur={() =>
-									void saveSettings({
-										disabledSites: normalizeRules(
-											disabledSitesValue.split(/\r?\n/),
-										),
-									})
-								}
-							/>
-						</label>
+						<textarea
+							className="settings-textarea"
+							value={disabledSitesValue}
+							onChange={(event) => setDisabledSitesValue(event.target.value)}
+							onBlur={() =>
+								void saveSettings({
+									disabledSites: normalizeRules(
+										disabledSitesValue.split(/\r?\n/g),
+									),
+								})
+							}
+							rows={4}
+						/>
 					</div>
 
-					<ShortcutEditor
-						shortcuts={settings.shortcuts}
-						onChange={(nextShortcuts) =>
-							void saveSettings({ shortcuts: nextShortcuts })
-						}
-					/>
+					<div className="settings-group">
+						<div className="section-heading">
+							<h3>Shortcuts</h3>
+							<span>
+								Single keys are faster, but may collide with site shortcuts.
+							</span>
+						</div>
+						<ShortcutEditor
+							shortcuts={settings.shortcuts}
+							onChange={(shortcuts) => void saveSettings({ shortcuts })}
+						/>
+					</div>
 				</section>
 			) : null}
 		</div>

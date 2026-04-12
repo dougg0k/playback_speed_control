@@ -5,7 +5,7 @@ import {
 	setLastSavedSpeed,
 } from "@/core/settings";
 import { isHostnameDisabled } from "@/core/siteRules";
-import { matchShortcutAction, isEditableTarget } from "@/core/shortcuts";
+import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { ToastController } from "@/core/toast";
 import { MediaRegistry } from "@/core/mediaRegistry";
 import type {
@@ -14,7 +14,7 @@ import type {
 	GetStateMessage,
 	RuntimeMessage,
 } from "@/types/messages";
-import type { AppSettings } from "@/types/settings";
+import { DEFAULT_SETTINGS, type AppSettings } from "@/types/settings";
 import { formatSpeed } from "@/utils/numbers";
 import { getCurrentHostname } from "@/utils/urls";
 import { browser } from "wxt/browser";
@@ -27,7 +27,8 @@ export default defineContentScript({
 	main() {
 		const hostname = getCurrentHostname();
 		const toast = new ToastController();
-		let settings: AppSettings;
+		let delayedRefreshTimer: number | null = null;
+		let lateRefreshTimer: number | null = null;
 
 		const resolveSettings = (nextSettings: AppSettings): AppSettings => ({
 			...nextSettings,
@@ -36,11 +37,15 @@ export default defineContentScript({
 				!isHostnameDisabled(hostname, nextSettings.disabledSites),
 		});
 
+		let settings: AppSettings = resolveSettings(DEFAULT_SETTINGS);
+		let desiredSpeed = settings.preferredSpeed;
+
 		const registry = new MediaRegistry({
 			getSettings: () => settings,
 			getDesiredSpeed: () => desiredSpeed,
 			hostname,
 			onSpeedPersist: async (speed) => {
+				desiredSpeed = speed;
 				if (!settings.rememberLastSpeed) return;
 				await setLastSavedSpeed(settings.saveScope, hostname, speed);
 			},
@@ -52,9 +57,13 @@ export default defineContentScript({
 			},
 		});
 
-		let desiredSpeed = 1;
-
 		const refreshDesiredSpeed = async () => {
+			if (!settings.enabled) {
+				desiredSpeed = 1;
+				registry.updateSettings();
+				return;
+			}
+
 			const remembered = settings.rememberLastSpeed
 				? await getLastSavedSpeed(settings.saveScope, hostname)
 				: null;
@@ -62,12 +71,46 @@ export default defineContentScript({
 			registry.updateSettings();
 		};
 
+		const emitCurrentState = () => {
+			registry.updateSettings();
+		};
+
+		const scheduleDelayedRefresh = () => {
+			if (delayedRefreshTimer !== null) {
+				window.clearTimeout(delayedRefreshTimer);
+			}
+
+			delayedRefreshTimer = window.setTimeout(() => {
+				delayedRefreshTimer = null;
+				emitCurrentState();
+			}, 200);
+		};
+
+		const scheduleLateRefresh = () => {
+			if (lateRefreshTimer !== null) {
+				window.clearTimeout(lateRefreshTimer);
+			}
+
+			lateRefreshTimer = window.setTimeout(() => {
+				lateRefreshTimer = null;
+				emitCurrentState();
+			}, 1000);
+		};
+
+		const showActionToast = (
+			action: "increase" | "decrease" | "reset" | "preferred",
+			speed: number,
+		) => {
+			if (!settings.toastEnabled) return;
+			toast.show(action === "reset" ? "Reset to 1x" : formatSpeed(speed));
+		};
+
 		const handleShortcutAction = async (
 			action: "increase" | "decrease" | "reset" | "preferred",
 		) => {
 			const nextSpeed = await registry.applyAction(action);
-			if (nextSpeed !== null && settings.toastEnabled) {
-				toast.show(action === "reset" ? "Reset to 1x" : formatSpeed(nextSpeed));
+			if (nextSpeed !== null) {
+				showActionToast(action, nextSpeed);
 			}
 		};
 
@@ -87,11 +130,10 @@ export default defineContentScript({
 			}
 
 			if ((runtimeMessage as ApplyActionMessage)?.type === "PSC_APPLY_ACTION") {
-				const nextSpeed = await registry.applyAction(
-					(runtimeMessage as ApplyActionMessage).payload.action,
-				);
-				if (nextSpeed !== null && settings.toastEnabled) {
-					toast.show(formatSpeed(nextSpeed));
+				const action = (runtimeMessage as ApplyActionMessage).payload.action;
+				const nextSpeed = await registry.applyAction(action);
+				if (nextSpeed !== null) {
+					showActionToast(action, nextSpeed);
 				}
 				return registry.getState();
 			}
@@ -113,11 +155,23 @@ export default defineContentScript({
 		};
 
 		const initialize = async () => {
+			browser.runtime.onMessage.addListener(handleRuntimeMessage);
+			registry.start();
+
 			settings = resolveSettings(await getSettings());
 			await refreshDesiredSpeed();
-			registry.start();
+
 			window.addEventListener("keydown", handleKeydown, true);
-			browser.runtime.onMessage.addListener(handleRuntimeMessage);
+			window.addEventListener("load", emitCurrentState, true);
+			window.addEventListener("pageshow", emitCurrentState, true);
+			window.addEventListener("focus", emitCurrentState, true);
+			document.addEventListener(
+				"visibilitychange",
+				scheduleDelayedRefresh,
+				true,
+			);
+			scheduleDelayedRefresh();
+			scheduleLateRefresh();
 		};
 
 		const stopListeningToStorage = listenForSettingsChanges(
@@ -131,8 +185,22 @@ export default defineContentScript({
 
 		return () => {
 			stopListeningToStorage();
+			if (delayedRefreshTimer !== null) {
+				window.clearTimeout(delayedRefreshTimer);
+			}
+			if (lateRefreshTimer !== null) {
+				window.clearTimeout(lateRefreshTimer);
+			}
 			registry.stop();
 			window.removeEventListener("keydown", handleKeydown, true);
+			window.removeEventListener("load", emitCurrentState, true);
+			window.removeEventListener("pageshow", emitCurrentState, true);
+			window.removeEventListener("focus", emitCurrentState, true);
+			document.removeEventListener(
+				"visibilitychange",
+				scheduleDelayedRefresh,
+				true,
+			);
 			browser.runtime.onMessage.removeListener(handleRuntimeMessage);
 		};
 	},

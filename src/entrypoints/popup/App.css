@@ -17,22 +17,14 @@
 }
 
 .eyebrow {
-	margin: 0 0 4px;
-	color: var(--text-muted);
-	font-size: 11px;
-	font-weight: 600;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-}
-
-.popup-header h1 {
 	margin: 0;
-	font-size: 26px;
-	line-height: 1;
-	letter-spacing: -0.04em;
+	color: var(--text-strong);
+	font-size: 17px;
+	font-weight: 700;
+	letter-spacing: 0.01em;
 }
 
-.hero-card,
+.speed-strip,
 .control-card,
 .settings-group {
 	border: 1px solid var(--surface-border);
@@ -42,57 +34,33 @@
 	box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
-.hero-card {
+.speed-strip {
 	display: flex;
-	align-items: flex-end;
-	justify-content: space-between;
-	gap: 12px;
+	align-items: center;
+	min-height: 52px;
+	padding: 12px 14px;
 }
 
-.muted-label {
-	margin: 0 0 4px;
-	font-size: 11px;
-	color: var(--text-muted);
-	text-transform: uppercase;
-	letter-spacing: 0.08em;
-}
-
-.speed-display {
-	font-size: 40px;
-	font-weight: 700;
-	line-height: 1;
-	letter-spacing: -0.05em;
-}
-
-.hero-meta {
+.speed-readout {
 	display: flex;
 	flex-direction: column;
-	align-items: flex-end;
-	gap: 8px;
+	gap: 4px;
+	min-width: 0;
 }
 
-.status-pill {
-	display: inline-flex;
-	align-items: center;
-	padding: 5px 10px;
-	border-radius: 999px;
-	background: rgba(148, 163, 184, 0.14);
+.speed-value {
+	color: var(--text-strong);
+	font-size: 28px;
+	font-weight: 700;
+	line-height: 1;
+	letter-spacing: -0.03em;
+}
+
+.speed-source {
 	color: var(--text-muted);
 	font-size: 12px;
-	font-weight: 600;
-}
-
-.status-pill.is-active {
-	background: rgba(245, 158, 11, 0.14);
-	color: var(--accent-strong);
-}
-
-.hostname {
-	max-width: 150px;
-	color: var(--text-muted);
-	font-size: 12px;
-	text-align: right;
-	line-break: anywhere;
+	line-height: 1.3;
+	word-break: break-word;
 }
 
 .control-card {
@@ -263,13 +231,16 @@
 	gap: 4px;
 }
 
-.input-hint {
-	font-size: 11px;
-	color: var(--text-muted);
-}
-
-.loading-state {
-	padding: 24px 16px;
-	color: var(--text-muted);
-	text-align: center;
+.settings-textarea {
+	width: 100%;
+	display: block;
+	border: 1px solid var(--surface-border);
+	border-radius: 12px;
+	background: var(--surface-base);
+	color: var(--text-strong);
+	padding: 10px 12px;
+	font: inherit;
+	box-sizing: border-box;
+	resize: vertical;
+	min-height: 96px;
 }

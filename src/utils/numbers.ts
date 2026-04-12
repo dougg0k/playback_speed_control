@@ -10,13 +10,11 @@ export function roundSpeed(value: number): number {
 export function formatSpeed(value: number | null | undefined): string {
 	if (typeof value !== "number" || Number.isNaN(value)) return "—";
 	const rounded = roundSpeed(value);
-	const text = Number.isInteger(rounded) ? `${rounded}` : `${rounded}`;
-	return `${text}x`;
+	return `${rounded}x`;
 }
 
 export function formatBadgeSpeed(value: number | null | undefined): string {
 	if (typeof value !== "number" || Number.isNaN(value)) return "";
 	const rounded = roundSpeed(value);
-	const withSuffix = Number.isInteger(rounded) ? `${rounded}x` : `${rounded}`;
-	return withSuffix.slice(0, 4);
+	return `${rounded}`.slice(0, 4);
 }

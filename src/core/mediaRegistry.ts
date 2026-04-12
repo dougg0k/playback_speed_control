@@ -72,8 +72,8 @@ export class MediaRegistry {
 			childList: true,
 			subtree: true,
 		});
+		this.applySettingsToMedia();
 		this.emitState();
-		this.maybeApplyDesiredSpeed();
 	}
 
 	stop(): void {
@@ -87,14 +87,15 @@ export class MediaRegistry {
 
 	updateSettings(): void {
 		this.cleanupDisconnectedMedia();
-		this.maybeApplyDesiredSpeed();
+		this.applySettingsToMedia();
 		this.emitState();
 	}
 
 	getState(): PopupState {
+		this.registerNode(document.documentElement);
 		this.cleanupDisconnectedMedia();
 		const settings = this.options.getSettings();
-		const active = settings.enabled ? this.getTargetMedia() : null;
+		const active = this.getTargetMedia();
 		const activeKind = active
 			? active instanceof HTMLVideoElement
 				? "video"
@@ -112,6 +113,7 @@ export class MediaRegistry {
 	}
 
 	async applyAction(action: ShortcutAction): Promise<number | null> {
+		this.registerNode(document.documentElement);
 		const target = this.getTargetMedia();
 		const settings = this.options.getSettings();
 		if (!settings.enabled || !target) return null;
@@ -137,6 +139,7 @@ export class MediaRegistry {
 	}
 
 	async applyExactSpeed(speed: number): Promise<number | null> {
+		this.registerNode(document.documentElement);
 		const target = this.getTargetMedia();
 		const settings = this.options.getSettings();
 		if (!settings.enabled || !target) return null;
@@ -213,6 +216,23 @@ export class MediaRegistry {
 
 		target.defaultPlaybackRate = desiredSpeed;
 		target.playbackRate = desiredSpeed;
+	}
+
+	private resetEligibleMediaToNormal(): void {
+		for (const element of this.getEligibleMedia()) {
+			element.defaultPlaybackRate = 1;
+			element.playbackRate = 1;
+		}
+	}
+
+	private applySettingsToMedia(): void {
+		const settings = this.options.getSettings();
+		if (!settings.enabled) {
+			this.resetEligibleMediaToNormal();
+			return;
+		}
+
+		this.maybeApplyDesiredSpeed();
 	}
 
 	private registerNode(node: Node): boolean {
@@ -294,7 +314,11 @@ export class MediaRegistry {
 
 		const onPlay = () => {
 			this.lastInteracted = element;
-			if (this.options.getSettings().forceSavedSpeedOnLoad) {
+			const settings = this.options.getSettings();
+			if (!settings.enabled) {
+				element.defaultPlaybackRate = 1;
+				element.playbackRate = 1;
+			} else if (settings.forceSavedSpeedOnLoad) {
 				const desired = this.options.getDesiredSpeed();
 				element.defaultPlaybackRate = desired;
 				element.playbackRate = desired;
@@ -303,7 +327,11 @@ export class MediaRegistry {
 		};
 
 		const onLoadedMetadata = () => {
-			if (this.options.getSettings().forceSavedSpeedOnLoad) {
+			const settings = this.options.getSettings();
+			if (!settings.enabled) {
+				element.defaultPlaybackRate = 1;
+				element.playbackRate = 1;
+			} else if (settings.forceSavedSpeedOnLoad) {
 				const desired = this.options.getDesiredSpeed();
 				element.defaultPlaybackRate = desired;
 				element.playbackRate = desired;
