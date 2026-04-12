@@ -32,8 +32,8 @@ export interface PersistedPlaybackState {
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutConfig = {
-  increase: "Alt+Shift+ArrowUp",
-  decrease: "Alt+Shift+ArrowDown",
+  increase: "d",
+  decrease: "s",
   reset: "Alt+Shift+0",
   preferred: "Alt+Shift+9",
 };
@@ -44,7 +44,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   speedStep: 0.1,
   rememberLastSpeed: true,
   saveScope: "site",
-  forceSavedSpeedOnLoad: false,
+  forceSavedSpeedOnLoad: true,
   workOnAudio: false,
   toastEnabled: true,
   disabledSites: [],

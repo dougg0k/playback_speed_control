@@ -17,7 +17,7 @@ export function ShortcutEditor({ shortcuts, onChange }: ShortcutEditorProps) {
     <div className="settings-group">
       <div className="section-heading">
         <h3>Shortcuts</h3>
-        <span>Use page-focused shortcuts like Alt+Shift+ArrowUp.</span>
+        <span>Default speed keys are d and s. Single-key shortcuts work when page focus is not in an input.</span>
       </div>
 
       <div className="shortcut-list">
@@ -27,7 +27,7 @@ export function ShortcutEditor({ shortcuts, onChange }: ShortcutEditorProps) {
             <input
               type="text"
               value={shortcuts[action]}
-              placeholder="Alt+Shift+ArrowUp"
+              placeholder={action === "increase" ? "d" : action === "decrease" ? "s" : "Alt+Shift+0"}
               onChange={(event) =>
                 onChange({
                   ...shortcuts,
