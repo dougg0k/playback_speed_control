@@ -25,6 +25,31 @@ const PERSISTED_FRAME_ID = -1;
 const frameStatesByTab = new Map<number, Map<number, PopupState>>();
 const popupPorts = new Set<browser.Runtime.Port>();
 
+type BadgeApi = {
+	setBadgeBackgroundColor(details: {
+		tabId?: number;
+		color: string | number[];
+	}): Promise<unknown> | void;
+	setBadgeText(details: {
+		tabId?: number;
+		text: string | null;
+	}): Promise<unknown> | void;
+};
+
+function getBadgeApi(): BadgeApi | null {
+	const maybeBrowser = browser as typeof browser & {
+		browserAction?: BadgeApi;
+		browser_action?: BadgeApi;
+	};
+
+	return (
+		maybeBrowser.action ??
+		maybeBrowser.browserAction ??
+		maybeBrowser.browser_action ??
+		null
+	);
+}
+
 function getPersistedTabStateKey(tabId: number): string {
 	return `${PERSISTED_TAB_STATE_PREFIX}${tabId}`;
 }
@@ -142,12 +167,18 @@ async function applyBadge(tabId: number): Promise<void> {
 		state?.hasMedia && !state.siteDisabled
 			? formatBadgeSpeed(state.currentSpeed)
 			: "";
+	const badgeApi = getBadgeApi();
 
-	await browser.action.setBadgeBackgroundColor({
-		tabId,
-		color: state?.siteDisabled ? "#475569" : "#F59E0B",
-	});
-	await browser.action.setBadgeText({ tabId, text: badgeText });
+	if (badgeApi) {
+		await Promise.resolve(
+			badgeApi.setBadgeBackgroundColor({
+				tabId,
+				color: state?.siteDisabled ? "#475569" : "#F59E0B",
+			}),
+		);
+		await Promise.resolve(badgeApi.setBadgeText({ tabId, text: badgeText }));
+	}
+
 	await writePersistedTabState(tabId, state);
 	notifyPopupPorts(tabId, state);
 }
@@ -263,7 +294,10 @@ export default defineBackground(() => {
 		if (changeInfo.status === "loading") {
 			void (async () => {
 				await clearTabState(tabId);
-				await browser.action.setBadgeText({ tabId, text: "" });
+				const badgeApi = getBadgeApi();
+				if (badgeApi) {
+					await Promise.resolve(badgeApi.setBadgeText({ tabId, text: "" }));
+				}
 				notifyPopupPorts(tabId, null);
 			})();
 		}

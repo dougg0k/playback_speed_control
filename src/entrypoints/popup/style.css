@@ -34,6 +34,8 @@ body {
 
 body {
 	min-height: auto;
+	font-size: 14px;
+	line-height: 1.4;
 }
 
 button,
@@ -41,10 +43,21 @@ input,
 textarea,
 select {
 	font: inherit;
+	font-size: 14px;
+	line-height: 1.2;
+}
+
+button,
+input:not([type="checkbox"]),
+textarea,
+select {
+	appearance: none;
+	-moz-appearance: none;
 }
 
 button {
 	cursor: pointer;
+	text-transform: none;
 }
 
 button:disabled,

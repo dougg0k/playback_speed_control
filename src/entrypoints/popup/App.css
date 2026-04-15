@@ -86,6 +86,8 @@
 	border: 1px solid var(--surface-border);
 	background: var(--surface-base);
 	color: var(--text-strong);
+	font-size: 13px;
+	line-height: 1.15;
 	font-weight: 600;
 	transition:
 		background-color 120ms ease,
@@ -151,6 +153,8 @@
 	color: var(--text-strong);
 	padding: 10px 12px;
 	font: inherit;
+	font-size: 13px;
+	line-height: 1.2;
 	box-sizing: border-box;
 }
 
@@ -240,6 +244,8 @@
 	color: var(--text-strong);
 	padding: 10px 12px;
 	font: inherit;
+	font-size: 13px;
+	line-height: 1.2;
 	box-sizing: border-box;
 	resize: vertical;
 	min-height: 96px;
