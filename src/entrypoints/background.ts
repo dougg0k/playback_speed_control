@@ -1,3 +1,10 @@
+import {
+	BADGE_COLORS,
+	BADGE_VALIDATION,
+	MESSAGE_TYPES,
+	PORT_NAMES,
+	STORAGE_KEYS,
+} from "@/constants/extension";
 import type {
 	ApplyActionMessage,
 	ApplyExactSpeedMessage,
@@ -19,12 +26,6 @@ interface FrameStateEntry {
 	state: PopupState;
 }
 
-const PERSISTED_TAB_STATE_PREFIX = "psc:tab-state:";
-const PERSISTED_FRAME_ID = -1;
-
-const frameStatesByTab = new Map<number, Map<number, PopupState>>();
-const popupPorts = new Set<browser.Runtime.Port>();
-
 type BadgeApi = {
 	setBadgeBackgroundColor(details: {
 		tabId?: number;
@@ -35,6 +36,18 @@ type BadgeApi = {
 		text: string | null;
 	}): Promise<unknown> | void;
 };
+
+type StorageAreaLike = {
+	get(
+		keys?: string | string[] | Record<string, unknown> | null,
+	): Promise<Record<string, unknown>>;
+	set(items: Record<string, unknown>): Promise<void>;
+	remove(keys: string | string[]): Promise<void>;
+};
+
+const PERSISTED_FRAME_ID = -1;
+const frameStatesByTab = new Map<number, Map<number, PopupState>>();
+const popupPorts = new Set<browser.Runtime.Port>();
 
 function getBadgeApi(): BadgeApi | null {
 	const maybeBrowser = browser as typeof browser & {
@@ -51,14 +64,40 @@ function getBadgeApi(): BadgeApi | null {
 }
 
 function getPersistedTabStateKey(tabId: number): string {
-	return `${PERSISTED_TAB_STATE_PREFIX}${tabId}`;
+	return `${STORAGE_KEYS.tabStatePrefix}${tabId}`;
+}
+
+function getTabStateStorageArea(): StorageAreaLike {
+	const maybeStorage = browser.storage as typeof browser.storage & {
+		session?: StorageAreaLike;
+	};
+
+	return maybeStorage.session ?? browser.storage.local;
+}
+
+async function clearLocalTabStateFallbackCache(): Promise<void> {
+	if (
+		(browser.storage as typeof browser.storage & { session?: StorageAreaLike })
+			.session
+	) {
+		return;
+	}
+
+	const storageArea = getTabStateStorageArea();
+	const stored = await storageArea.get(null);
+	const keys = Object.keys(stored).filter((key) =>
+		key.startsWith(STORAGE_KEYS.tabStatePrefix),
+	);
+	if (keys.length > 0) {
+		await storageArea.remove(keys);
+	}
 }
 
 async function readPersistedTabState(
 	tabId: number,
 ): Promise<PopupState | null> {
 	const key = getPersistedTabStateKey(tabId);
-	const stored = await browser.storage.session.get(key);
+	const stored = await getTabStateStorageArea().get(key);
 	return (stored[key] as PopupState | undefined) ?? null;
 }
 
@@ -67,10 +106,12 @@ async function writePersistedTabState(
 	state: PopupState | null,
 ): Promise<void> {
 	const key = getPersistedTabStateKey(tabId);
+	const storageArea = getTabStateStorageArea();
+
 	if (state) {
-		await browser.storage.session.set({ [key]: state });
+		await storageArea.set({ [key]: state });
 	} else {
-		await browser.storage.session.remove(key);
+		await storageArea.remove(key);
 	}
 }
 
@@ -146,9 +187,21 @@ function getBestState(tabId: number): PopupState | null {
 	return entries[0]?.state ?? null;
 }
 
+function isBadgeStateStable(state: PopupState | null): state is PopupState {
+	return Boolean(
+		state &&
+			state.hasMedia &&
+			state.activeKind &&
+			state.hostname &&
+			typeof state.currentSpeed === "number" &&
+			Number.isFinite(state.currentSpeed) &&
+			state.currentSpeed >= BADGE_VALIDATION.minStableSpeed,
+	);
+}
+
 function notifyPopupPorts(tabId: number, state: PopupState | null): void {
 	const message: TabStateChangedMessage = {
-		type: "PSC_TAB_STATE_CHANGED",
+		type: MESSAGE_TYPES.tabStateChanged,
 		payload: { tabId, state },
 	};
 
@@ -163,20 +216,34 @@ function notifyPopupPorts(tabId: number, state: PopupState | null): void {
 
 async function applyBadge(tabId: number): Promise<void> {
 	const state = getBestState(tabId);
-	const badgeText =
-		state?.hasMedia && !state.siteDisabled
-			? formatBadgeSpeed(state.currentSpeed)
-			: "";
-	const badgeApi = getBadgeApi();
+	const preserveExistingBadge = Boolean(
+		state &&
+			typeof state.currentSpeed === "number" &&
+			Number.isFinite(state.currentSpeed) &&
+			state.currentSpeed > 0 &&
+			state.currentSpeed < BADGE_VALIDATION.minStableSpeed,
+	);
 
-	if (badgeApi) {
-		await Promise.resolve(
-			badgeApi.setBadgeBackgroundColor({
-				tabId,
-				color: state?.siteDisabled ? "#475569" : "#F59E0B",
-			}),
-		);
-		await Promise.resolve(badgeApi.setBadgeText({ tabId, text: badgeText }));
+	if (!preserveExistingBadge) {
+		const stableBadgeState =
+			isBadgeStateStable(state) && !state.siteDisabled ? state : null;
+		const badgeText = stableBadgeState
+			? formatBadgeSpeed(stableBadgeState.currentSpeed)
+			: "";
+		const badgeColor = state?.siteDisabled
+			? BADGE_COLORS.disabled
+			: BADGE_COLORS.active;
+		const badgeApi = getBadgeApi();
+
+		if (badgeApi) {
+			await Promise.resolve(
+				badgeApi.setBadgeBackgroundColor({
+					tabId,
+					color: badgeColor,
+				}),
+			);
+			await Promise.resolve(badgeApi.setBadgeText({ tabId, text: badgeText }));
+		}
 	}
 
 	await writePersistedTabState(tabId, state);
@@ -199,7 +266,11 @@ async function sendContentMessage(
 }
 
 async function refreshTopFrameState(tabId: number): Promise<PopupState | null> {
-	const state = await sendContentMessage(tabId, { type: "PSC_GET_STATE" }, 0);
+	const state = await sendContentMessage(
+		tabId,
+		{ type: MESSAGE_TYPES.getState },
+		0,
+	);
 	if (state) {
 		setFrameState(tabId, 0, state);
 	}
@@ -235,8 +306,12 @@ async function relayToTopFrame(
 }
 
 export default defineBackground(() => {
+	void clearLocalTabStateFallbackCache();
+
+	popupPorts.clear();
+
 	browser.runtime.onConnect.addListener((port) => {
-		if (port.name !== "psc-popup") return;
+		if (port.name !== PORT_NAMES.popup) return;
 
 		popupPorts.add(port);
 		port.onDisconnect.addListener(() => {
@@ -246,7 +321,7 @@ export default defineBackground(() => {
 
 	browser.runtime.onMessage.addListener((message: unknown, sender) => {
 		const snapshotMessage = message as StateSnapshotMessage;
-		if (snapshotMessage?.type === "PSC_STATE_SNAPSHOT") {
+		if (snapshotMessage?.type === MESSAGE_TYPES.stateSnapshot) {
 			const tabId = sender.tab?.id;
 			const frameId = sender.frameId ?? 0;
 			if (typeof tabId !== "number") return undefined;
@@ -259,22 +334,22 @@ export default defineBackground(() => {
 		}
 
 		const getTabStateMessage = message as GetTabStateMessage;
-		if (getTabStateMessage?.type === "PSC_GET_TAB_STATE") {
+		if (getTabStateMessage?.type === MESSAGE_TYPES.getTabState) {
 			return getTabState(getTabStateMessage.payload.tabId);
 		}
 
 		const applyTabActionMessage = message as ApplyTabActionMessage;
-		if (applyTabActionMessage?.type === "PSC_APPLY_TAB_ACTION") {
+		if (applyTabActionMessage?.type === MESSAGE_TYPES.applyTabAction) {
 			return relayToTopFrame(applyTabActionMessage.payload.tabId, {
-				type: "PSC_APPLY_ACTION",
+				type: MESSAGE_TYPES.applyAction,
 				payload: { action: applyTabActionMessage.payload.action },
 			} satisfies ApplyActionMessage);
 		}
 
 		const applyTabExactSpeedMessage = message as ApplyTabExactSpeedMessage;
-		if (applyTabExactSpeedMessage?.type === "PSC_APPLY_TAB_EXACT_SPEED") {
+		if (applyTabExactSpeedMessage?.type === MESSAGE_TYPES.applyTabExactSpeed) {
 			return relayToTopFrame(applyTabExactSpeedMessage.payload.tabId, {
-				type: "PSC_APPLY_EXACT_SPEED",
+				type: MESSAGE_TYPES.applyExactSpeed,
 				payload: { speed: applyTabExactSpeedMessage.payload.speed },
 			} satisfies ApplyExactSpeedMessage);
 		}

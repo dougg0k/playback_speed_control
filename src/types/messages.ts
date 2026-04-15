@@ -1,3 +1,4 @@
+import { MESSAGE_TYPES } from "@/constants/extension";
 import type { ShortcutAction } from "./settings";
 
 export interface PopupState {
@@ -10,37 +11,37 @@ export interface PopupState {
 }
 
 export interface StateSnapshotMessage {
-	type: "PSC_STATE_SNAPSHOT";
+	type: typeof MESSAGE_TYPES.stateSnapshot;
 	payload: PopupState;
 }
 
 export interface GetStateMessage {
-	type: "PSC_GET_STATE";
+	type: typeof MESSAGE_TYPES.getState;
 }
 
 export interface ApplyActionMessage {
-	type: "PSC_APPLY_ACTION";
+	type: typeof MESSAGE_TYPES.applyAction;
 	payload: {
 		action: ShortcutAction;
 	};
 }
 
 export interface ApplyExactSpeedMessage {
-	type: "PSC_APPLY_EXACT_SPEED";
+	type: typeof MESSAGE_TYPES.applyExactSpeed;
 	payload: {
 		speed: number;
 	};
 }
 
 export interface GetTabStateMessage {
-	type: "PSC_GET_TAB_STATE";
+	type: typeof MESSAGE_TYPES.getTabState;
 	payload: {
 		tabId: number;
 	};
 }
 
 export interface ApplyTabActionMessage {
-	type: "PSC_APPLY_TAB_ACTION";
+	type: typeof MESSAGE_TYPES.applyTabAction;
 	payload: {
 		tabId: number;
 		action: ShortcutAction;
@@ -48,7 +49,7 @@ export interface ApplyTabActionMessage {
 }
 
 export interface ApplyTabExactSpeedMessage {
-	type: "PSC_APPLY_TAB_EXACT_SPEED";
+	type: typeof MESSAGE_TYPES.applyTabExactSpeed;
 	payload: {
 		tabId: number;
 		speed: number;
@@ -60,7 +61,7 @@ export interface TabStateResponse {
 }
 
 export interface TabStateChangedMessage {
-	type: "PSC_TAB_STATE_CHANGED";
+	type: typeof MESSAGE_TYPES.tabStateChanged;
 	payload: {
 		tabId: number;
 		state: PopupState | null;

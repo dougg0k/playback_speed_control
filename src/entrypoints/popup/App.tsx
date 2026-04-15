@@ -1,4 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+	MESSAGE_TYPES,
+	POPUP_STATE_TIMEOUTS_MS,
+	PORT_NAMES,
+} from "@/constants/extension";
 import { getSettings, updateSettings } from "@/core/settings";
 import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { normalizeRules } from "@/core/siteRules";
@@ -57,10 +62,10 @@ async function requestTabState(tabId: number): Promise<PopupState | null> {
 		const directResponse = await withTimeout(
 			browser.tabs.sendMessage(
 				tabId,
-				{ type: "PSC_GET_STATE" },
+				{ type: MESSAGE_TYPES.getState },
 				{ frameId: 0 },
 			) as Promise<PopupState | null | undefined>,
-			700,
+			POPUP_STATE_TIMEOUTS_MS.directRead,
 			null,
 		);
 		bestState = pickBetterState(bestState, directResponse ?? null);
@@ -71,12 +76,12 @@ async function requestTabState(tabId: number): Promise<PopupState | null> {
 	try {
 		const response = await withTimeout(
 			browser.runtime.sendMessage({
-				type: "PSC_GET_TAB_STATE",
+				type: MESSAGE_TYPES.getTabState,
 				payload: { tabId },
 			} satisfies GetTabStateMessage) as Promise<
 				TabStateResponse | null | undefined
 			>,
-			900,
+			POPUP_STATE_TIMEOUTS_MS.backgroundRead,
 			null,
 		);
 		bestState = pickBetterState(bestState, response?.state ?? null);
@@ -102,15 +107,21 @@ async function requestPopupStatus(
 
 	let state = await requestTabState(tabId);
 	if (getStateScore(state) < 100) {
-		await new Promise((resolve) => window.setTimeout(resolve, 200));
+		await new Promise((resolve) =>
+			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryShort),
+		);
 		state = pickBetterState(state, await requestTabState(tabId));
 	}
 	if (getStateScore(state) < 100) {
-		await new Promise((resolve) => window.setTimeout(resolve, 600));
+		await new Promise((resolve) =>
+			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryMedium),
+		);
 		state = pickBetterState(state, await requestTabState(tabId));
 	}
 	if (getStateScore(state) < 100) {
-		await new Promise((resolve) => window.setTimeout(resolve, 1200));
+		await new Promise((resolve) =>
+			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryLong),
+		);
 		state = pickBetterState(state, await requestTabState(tabId));
 	}
 
@@ -202,10 +213,10 @@ function App() {
 				unavailableReason: activeTabId ? null : "No active tab.",
 			});
 
-			port = browser.runtime.connect({ name: "psc-popup" });
+			port = browser.runtime.connect({ name: PORT_NAMES.popup });
 			handlePortMessage = (message: unknown) => {
 				const runtimeMessage = message as TabStateChangedMessage;
-				if (runtimeMessage?.type !== "PSC_TAB_STATE_CHANGED") return;
+				if (runtimeMessage?.type !== MESSAGE_TYPES.tabStateChanged) return;
 				if (activeTabIdRef.current !== runtimeMessage.payload.tabId) return;
 
 				setPopupStatus((current) =>
@@ -228,7 +239,7 @@ function App() {
 								: current,
 						);
 					});
-				}, 500);
+				}, POPUP_STATE_TIMEOUTS_MS.retryAfterOpen);
 			}
 		})();
 
@@ -253,17 +264,17 @@ function App() {
 		try {
 			let response: PopupState | null = null;
 
-			if (message.type === "PSC_APPLY_TAB_ACTION") {
+			if (message.type === MESSAGE_TYPES.applyTabAction) {
 				response = await withTimeout(
 					browser.tabs.sendMessage(
 						tabId,
 						{
-							type: "PSC_APPLY_ACTION",
+							type: MESSAGE_TYPES.applyAction,
 							payload: { action: message.payload.action },
 						} satisfies ApplyActionMessage,
 						{ frameId: 0 },
 					) as Promise<PopupState | null | undefined>,
-					800,
+					POPUP_STATE_TIMEOUTS_MS.action,
 					null,
 				);
 			} else {
@@ -271,12 +282,12 @@ function App() {
 					browser.tabs.sendMessage(
 						tabId,
 						{
-							type: "PSC_APPLY_EXACT_SPEED",
+							type: MESSAGE_TYPES.applyExactSpeed,
 							payload: { speed: message.payload.speed },
 						} satisfies ApplyExactSpeedMessage,
 						{ frameId: 0 },
 					) as Promise<PopupState | null | undefined>,
-					800,
+					POPUP_STATE_TIMEOUTS_MS.action,
 					null,
 				);
 			}
@@ -303,7 +314,7 @@ function App() {
 			event.preventDefault();
 			event.stopPropagation();
 			void sendAction({
-				type: "PSC_APPLY_TAB_ACTION",
+				type: MESSAGE_TYPES.applyTabAction,
 				payload: { tabId: popupStatus.activeTabId, action },
 			} satisfies ApplyTabActionMessage);
 		};
@@ -387,7 +398,7 @@ function App() {
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_TAB_ACTION",
+								type: MESSAGE_TYPES.applyTabAction,
 								payload: { tabId: popupStatus.activeTabId, action: "decrease" },
 							} satisfies ApplyTabActionMessage);
 						}}
@@ -401,7 +412,7 @@ function App() {
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_TAB_ACTION",
+								type: MESSAGE_TYPES.applyTabAction,
 								payload: { tabId: popupStatus.activeTabId, action: "increase" },
 							} satisfies ApplyTabActionMessage);
 						}}
@@ -415,7 +426,7 @@ function App() {
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_TAB_ACTION",
+								type: MESSAGE_TYPES.applyTabAction,
 								payload: { tabId: popupStatus.activeTabId, action: "reset" },
 							} satisfies ApplyTabActionMessage);
 						}}
@@ -429,7 +440,7 @@ function App() {
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
 							void sendAction({
-								type: "PSC_APPLY_TAB_ACTION",
+								type: MESSAGE_TYPES.applyTabAction,
 								payload: {
 									tabId: popupStatus.activeTabId,
 									action: "preferred",
@@ -520,7 +531,7 @@ function App() {
 												settings.preferredSpeed,
 											);
 											void sendAction({
-												type: "PSC_APPLY_TAB_EXACT_SPEED",
+												type: MESSAGE_TYPES.applyTabExactSpeed,
 												payload: {
 													tabId: popupStatus.activeTabId,
 													speed: nextSpeed,

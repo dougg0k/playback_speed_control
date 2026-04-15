@@ -1,3 +1,4 @@
+import { MESSAGE_TYPES } from "@/constants/extension";
 import {
 	getSettings,
 	getLastSavedSpeed,
@@ -51,7 +52,7 @@ export default defineContentScript({
 			},
 			onStateChanged: (state) => {
 				void browser.runtime.sendMessage({
-					type: "PSC_STATE_SNAPSHOT",
+					type: MESSAGE_TYPES.stateSnapshot,
 					payload: state,
 				} satisfies RuntimeMessage);
 			},
@@ -125,11 +126,16 @@ export default defineContentScript({
 		const handleRuntimeMessage = async (message: unknown) => {
 			const runtimeMessage = message as RuntimeMessage;
 
-			if ((runtimeMessage as GetStateMessage)?.type === "PSC_GET_STATE") {
+			if (
+				(runtimeMessage as GetStateMessage)?.type === MESSAGE_TYPES.getState
+			) {
 				return registry.getState();
 			}
 
-			if ((runtimeMessage as ApplyActionMessage)?.type === "PSC_APPLY_ACTION") {
+			if (
+				(runtimeMessage as ApplyActionMessage)?.type ===
+				MESSAGE_TYPES.applyAction
+			) {
 				const action = (runtimeMessage as ApplyActionMessage).payload.action;
 				const nextSpeed = await registry.applyAction(action);
 				if (nextSpeed !== null) {
@@ -140,7 +146,7 @@ export default defineContentScript({
 
 			if (
 				(runtimeMessage as ApplyExactSpeedMessage)?.type ===
-				"PSC_APPLY_EXACT_SPEED"
+				MESSAGE_TYPES.applyExactSpeed
 			) {
 				const nextSpeed = await registry.applyExactSpeed(
 					(runtimeMessage as ApplyExactSpeedMessage).payload.speed,

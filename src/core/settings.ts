@@ -1,3 +1,4 @@
+import { STORAGE_KEYS } from "@/constants/extension";
 import {
 	DEFAULT_PLAYBACK_STATE,
 	DEFAULT_SETTINGS,
@@ -9,9 +10,6 @@ import {
 import { clampSpeed } from "@/utils/numbers";
 import { normalizeRules } from "./siteRules";
 import { browser } from "wxt/browser";
-
-const SETTINGS_KEY = "psc:settings";
-const PLAYBACK_STATE_KEY = "psc:playback-state";
 
 function sanitizeShortcuts(
 	value: Partial<ShortcutConfig> | undefined,
@@ -79,9 +77,9 @@ function sanitizePlaybackState(
 }
 
 export async function getSettings(): Promise<AppSettings> {
-	const stored = await browser.storage.local.get(SETTINGS_KEY);
+	const stored = await browser.storage.local.get(STORAGE_KEYS.settings);
 	return sanitizeSettings(
-		stored[SETTINGS_KEY] as Partial<AppSettings> | undefined,
+		stored[STORAGE_KEYS.settings] as Partial<AppSettings> | undefined,
 	);
 }
 
@@ -90,14 +88,16 @@ export async function updateSettings(
 ): Promise<AppSettings> {
 	const current = await getSettings();
 	const next = sanitizeSettings({ ...current, ...partial });
-	await browser.storage.local.set({ [SETTINGS_KEY]: next });
+	await browser.storage.local.set({ [STORAGE_KEYS.settings]: next });
 	return next;
 }
 
 export async function getPlaybackState(): Promise<PersistedPlaybackState> {
-	const stored = await browser.storage.local.get(PLAYBACK_STATE_KEY);
+	const stored = await browser.storage.local.get(STORAGE_KEYS.playbackState);
 	return sanitizePlaybackState(
-		stored[PLAYBACK_STATE_KEY] as Partial<PersistedPlaybackState> | undefined,
+		stored[STORAGE_KEYS.playbackState] as
+			| Partial<PersistedPlaybackState>
+			| undefined,
 	);
 }
 
@@ -127,7 +127,7 @@ export async function setLastSavedSpeed(
 		};
 	}
 
-	await browser.storage.local.set({ [PLAYBACK_STATE_KEY]: next });
+	await browser.storage.local.set({ [STORAGE_KEYS.playbackState]: next });
 }
 
 export function listenForSettingsChanges(
@@ -137,9 +137,11 @@ export function listenForSettingsChanges(
 		changes: Record<string, browser.Storage.StorageChange>,
 		areaName: string,
 	) => {
-		if (areaName !== "local" || !(SETTINGS_KEY in changes)) return;
+		if (areaName !== "local" || !(STORAGE_KEYS.settings in changes)) return;
 		callback(
-			sanitizeSettings(changes[SETTINGS_KEY].newValue as Partial<AppSettings>),
+			sanitizeSettings(
+				changes[STORAGE_KEYS.settings].newValue as Partial<AppSettings>,
+			),
 		);
 	};
 

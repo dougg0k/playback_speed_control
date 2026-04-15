@@ -1,11 +1,5 @@
+import { SHORTCUT_LABELS, SHORTCUT_PLACEHOLDERS } from "@/constants/extension";
 import type { ShortcutAction, ShortcutConfig } from "@/types/settings";
-
-const LABELS: Record<ShortcutAction, string> = {
-	increase: "Increase speed",
-	decrease: "Decrease speed",
-	reset: "Reset to 1x",
-	preferred: "Apply preferred speed",
-};
 
 interface ShortcutEditorProps {
 	shortcuts: ShortcutConfig;
@@ -17,17 +11,11 @@ export function ShortcutEditor({ shortcuts, onChange }: ShortcutEditorProps) {
 		<div className="shortcut-list">
 			{(Object.keys(shortcuts) as ShortcutAction[]).map((action) => (
 				<label className="field" key={action}>
-					<span>{LABELS[action]}</span>
+					<span>{SHORTCUT_LABELS[action]}</span>
 					<input
 						type="text"
 						value={shortcuts[action]}
-						placeholder={
-							action === "increase"
-								? "d"
-								: action === "decrease"
-									? "s"
-									: "Alt+Shift+0"
-						}
+						placeholder={SHORTCUT_PLACEHOLDERS[action]}
 						onChange={(event) =>
 							onChange({
 								...shortcuts,
