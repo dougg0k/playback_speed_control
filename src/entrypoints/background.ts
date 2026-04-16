@@ -49,6 +49,20 @@ const PERSISTED_FRAME_ID = -1;
 const frameStatesByTab = new Map<number, Map<number, PopupState>>();
 const popupPorts = new Set<browser.Runtime.Port>();
 
+function isMissingTabError(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	return text.includes("No tab with id");
+}
+
+async function tabExists(tabId: number): Promise<boolean> {
+	try {
+		const tab = await browser.tabs.get(tabId);
+		return typeof tab?.id === "number";
+	} catch {
+		return false;
+	}
+}
+
 function getBadgeApi(): BadgeApi | null {
 	const maybeBrowser = browser as typeof browser & {
 		browserAction?: BadgeApi;
@@ -255,12 +269,20 @@ async function sendContentMessage(
 	message: ContentRequestMessage,
 	frameId = 0,
 ): Promise<PopupState | null> {
+	if (!(await tabExists(tabId))) {
+		await clearTabState(tabId);
+		return null;
+	}
+
 	try {
 		const response = await browser.tabs.sendMessage(tabId, message, {
 			frameId,
 		});
 		return (response as PopupState | null | undefined) ?? null;
-	} catch {
+	} catch (error) {
+		if (isMissingTabError(error)) {
+			await clearTabState(tabId);
+		}
 		return null;
 	}
 }
@@ -279,6 +301,11 @@ async function refreshTopFrameState(tabId: number): Promise<PopupState | null> {
 }
 
 async function getTabState(tabId: number): Promise<TabStateResponse> {
+	if (!(await tabExists(tabId))) {
+		await clearTabState(tabId);
+		return { state: null };
+	}
+
 	await hydratePersistedTabState(tabId);
 	const cachedState = getBestState(tabId);
 	const freshState = await refreshTopFrameState(tabId);
@@ -292,6 +319,11 @@ async function relayToTopFrame(
 	tabId: number,
 	message: ContentRequestMessage,
 ): Promise<TabStateResponse> {
+	if (!(await tabExists(tabId))) {
+		await clearTabState(tabId);
+		return { state: null };
+	}
+
 	await hydratePersistedTabState(tabId);
 
 	const response = await sendContentMessage(tabId, message, 0);

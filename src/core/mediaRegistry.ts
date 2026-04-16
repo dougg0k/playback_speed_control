@@ -11,7 +11,7 @@ export interface MediaRegistryOptions {
 }
 
 interface ListenerBundle {
-	onInteraction: () => void;
+	onMediaInteraction: () => void;
 	onPlay: () => void;
 	onLoadedMetadata: () => void;
 	onRateChange: () => void;
@@ -38,11 +38,28 @@ function isPlayableMedia(element: HTMLMediaElement): boolean {
 }
 
 export class MediaRegistry {
+	private static readonly USER_INTERACTION_WINDOW_MS = 1500;
+	private static readonly LIFECYCLE_RESTORE_WINDOW_MS = 1200;
+	private static readonly SPEED_EPSILON = 0.01;
+
 	private readonly options: MediaRegistryOptions;
 	private readonly media = new Set<HTMLMediaElement>();
 	private readonly listeners = new WeakMap<HTMLMediaElement, ListenerBundle>();
 	private readonly observer: MutationObserver;
+	private readonly programmaticSpeedChanges = new WeakMap<
+		HTMLMediaElement,
+		number
+	>();
+	private readonly lifecycleRestoreUntil = new WeakMap<
+		HTMLMediaElement,
+		number
+	>();
+	private readonly lifecycleStartedAt = new WeakMap<HTMLMediaElement, number>();
+	private readonly onDocumentInteraction = () => {
+		this.lastUserInteractionAt = performance.now();
+	};
 	private lastInteracted: HTMLMediaElement | null = null;
+	private lastUserInteractionAt = 0;
 
 	constructor(options: MediaRegistryOptions) {
 		this.options = options;
@@ -72,12 +89,20 @@ export class MediaRegistry {
 			childList: true,
 			subtree: true,
 		});
+		document.addEventListener("pointerdown", this.onDocumentInteraction, true);
+		document.addEventListener("keydown", this.onDocumentInteraction, true);
 		this.applySettingsToMedia();
 		this.emitState();
 	}
 
 	stop(): void {
 		this.observer.disconnect();
+		document.removeEventListener(
+			"pointerdown",
+			this.onDocumentInteraction,
+			true,
+		);
+		document.removeEventListener("keydown", this.onDocumentInteraction, true);
 		for (const element of this.media) {
 			this.detachListeners(element);
 		}
@@ -145,8 +170,7 @@ export class MediaRegistry {
 		if (!settings.enabled || !target) return null;
 
 		const nextSpeed = clampSpeed(speed);
-		target.defaultPlaybackRate = nextSpeed;
-		target.playbackRate = nextSpeed;
+		this.setMediaSpeed(target, nextSpeed);
 		this.lastInteracted = target;
 		await this.options.onSpeedPersist(nextSpeed);
 		this.emitState();
@@ -181,13 +205,10 @@ export class MediaRegistry {
 		});
 	}
 
-	private getTargetMedia(): HTMLMediaElement | null {
-		const eligibleMedia = this.getEligibleMedia();
+	private getPrimaryMediaCandidate(
+		eligibleMedia: HTMLMediaElement[],
+	): HTMLMediaElement | null {
 		if (eligibleMedia.length === 0) return null;
-
-		if (this.lastInteracted && eligibleMedia.includes(this.lastInteracted)) {
-			return this.lastInteracted;
-		}
 
 		const playingVisibleVideo = eligibleMedia.find(
 			(element) =>
@@ -206,6 +227,32 @@ export class MediaRegistry {
 		return eligibleMedia[0];
 	}
 
+	private isUsableLastInteracted(
+		element: HTMLMediaElement,
+		eligibleMedia: HTMLMediaElement[],
+	): boolean {
+		return (
+			eligibleMedia.includes(element) &&
+			(element instanceof HTMLAudioElement ||
+				!element.paused ||
+				isVisible(element))
+		);
+	}
+
+	private getTargetMedia(): HTMLMediaElement | null {
+		const eligibleMedia = this.getEligibleMedia();
+		if (eligibleMedia.length === 0) return null;
+
+		if (
+			this.lastInteracted &&
+			this.isUsableLastInteracted(this.lastInteracted, eligibleMedia)
+		) {
+			return this.lastInteracted;
+		}
+
+		return this.getPrimaryMediaCandidate(eligibleMedia);
+	}
+
 	private maybeApplyDesiredSpeed(): void {
 		const settings = this.options.getSettings();
 		if (!settings.enabled || !settings.forceSavedSpeedOnLoad) return;
@@ -214,14 +261,67 @@ export class MediaRegistry {
 		const target = this.getTargetMedia();
 		if (!target) return;
 
-		target.defaultPlaybackRate = desiredSpeed;
-		target.playbackRate = desiredSpeed;
+		this.setMediaSpeed(target, desiredSpeed);
+	}
+
+	private setMediaSpeed(element: HTMLMediaElement, speed: number): void {
+		const nextSpeed = clampSpeed(speed);
+		this.programmaticSpeedChanges.set(element, nextSpeed);
+		element.defaultPlaybackRate = nextSpeed;
+		element.playbackRate = nextSpeed;
+	}
+
+	private syncMediaDefaultSpeed(
+		element: HTMLMediaElement,
+		speed: number,
+	): void {
+		element.defaultPlaybackRate = clampSpeed(speed);
+	}
+
+	private shouldAdoptExternalRateChange(element: HTMLMediaElement): boolean {
+		const now = performance.now();
+		const recentlyInteracted =
+			now - this.lastUserInteractionAt <=
+			MediaRegistry.USER_INTERACTION_WINDOW_MS;
+		const eligibleMedia = this.getEligibleMedia();
+		const primaryCandidate = this.getPrimaryMediaCandidate(eligibleMedia);
+
+		return (
+			recentlyInteracted &&
+			(this.lastInteracted === element || primaryCandidate === element)
+		);
+	}
+
+	private markLifecycleRestoreWindow(element: HTMLMediaElement): void {
+		const now = performance.now();
+		this.lifecycleStartedAt.set(element, now);
+		this.lifecycleRestoreUntil.set(
+			element,
+			now + MediaRegistry.LIFECYCLE_RESTORE_WINDOW_MS,
+		);
+	}
+
+	private isWithinLifecycleRestoreWindow(element: HTMLMediaElement): boolean {
+		return (this.lifecycleRestoreUntil.get(element) ?? 0) > performance.now();
+	}
+
+	private shouldTreatLifecycleRateChangeAsManual(
+		element: HTMLMediaElement,
+	): boolean {
+		const lifecycleStartedAt = this.lifecycleStartedAt.get(element) ?? 0;
+		const now = performance.now();
+		const recentlyInteracted =
+			now - this.lastUserInteractionAt <=
+			MediaRegistry.USER_INTERACTION_WINDOW_MS;
+
+		return (
+			recentlyInteracted && this.lastUserInteractionAt > lifecycleStartedAt + 50
+		);
 	}
 
 	private resetEligibleMediaToNormal(): void {
 		for (const element of this.getEligibleMedia()) {
-			element.defaultPlaybackRate = 1;
-			element.playbackRate = 1;
+			this.setMediaSpeed(element, 1);
 		}
 	}
 
@@ -307,7 +407,7 @@ export class MediaRegistry {
 		if (this.media.has(element)) return false;
 		this.media.add(element);
 
-		const onInteraction = () => {
+		const onMediaInteraction = () => {
 			this.lastInteracted = element;
 			this.emitState();
 		};
@@ -315,46 +415,117 @@ export class MediaRegistry {
 		const onPlay = () => {
 			this.lastInteracted = element;
 			const settings = this.options.getSettings();
+			this.markLifecycleRestoreWindow(element);
 			if (!settings.enabled) {
-				element.defaultPlaybackRate = 1;
-				element.playbackRate = 1;
+				this.setMediaSpeed(element, 1);
 			} else if (settings.forceSavedSpeedOnLoad) {
-				const desired = this.options.getDesiredSpeed();
-				element.defaultPlaybackRate = desired;
-				element.playbackRate = desired;
+				this.setMediaSpeed(element, this.options.getDesiredSpeed());
 			}
 			this.emitState();
 		};
 
 		const onLoadedMetadata = () => {
 			const settings = this.options.getSettings();
+			this.markLifecycleRestoreWindow(element);
 			if (!settings.enabled) {
-				element.defaultPlaybackRate = 1;
-				element.playbackRate = 1;
+				this.setMediaSpeed(element, 1);
 			} else if (settings.forceSavedSpeedOnLoad) {
-				const desired = this.options.getDesiredSpeed();
-				element.defaultPlaybackRate = desired;
-				element.playbackRate = desired;
+				this.setMediaSpeed(element, this.options.getDesiredSpeed());
 			}
 			this.emitState();
 		};
 
 		const onRateChange = () => {
-			if (this.lastInteracted === element) {
-				void this.options.onSpeedPersist(element.playbackRate);
+			const expectedProgrammaticSpeed =
+				this.programmaticSpeedChanges.get(element);
+			if (typeof expectedProgrammaticSpeed === "number") {
+				if (
+					Math.abs(element.playbackRate - expectedProgrammaticSpeed) <=
+					MediaRegistry.SPEED_EPSILON
+				) {
+					this.programmaticSpeedChanges.delete(element);
+					this.emitState();
+					return;
+				}
+
+				this.programmaticSpeedChanges.delete(element);
 			}
+
+			const settings = this.options.getSettings();
+			const desiredSpeed = this.options.getDesiredSpeed();
+			const eligibleMedia = this.getEligibleMedia();
+			const primaryCandidate = this.getPrimaryMediaCandidate(eligibleMedia);
+			const isTrackedTarget =
+				this.lastInteracted === element || primaryCandidate === element;
+			const withinLifecycleRestoreWindow =
+				this.isWithinLifecycleRestoreWindow(element);
+
+			if (!settings.enabled) {
+				if (Math.abs(element.playbackRate - 1) > MediaRegistry.SPEED_EPSILON) {
+					this.setMediaSpeed(element, 1);
+				}
+				this.emitState();
+				return;
+			}
+
+			if (withinLifecycleRestoreWindow) {
+				if (
+					isTrackedTarget &&
+					this.shouldTreatLifecycleRateChangeAsManual(element)
+				) {
+					this.lastInteracted = element;
+					this.syncMediaDefaultSpeed(element, element.playbackRate);
+					void this.options.onSpeedPersist(element.playbackRate);
+					this.emitState();
+					return;
+				}
+
+				if (
+					settings.forceSavedSpeedOnLoad &&
+					isTrackedTarget &&
+					Math.abs(element.playbackRate - desiredSpeed) >
+						MediaRegistry.SPEED_EPSILON
+				) {
+					this.setMediaSpeed(element, desiredSpeed);
+					this.emitState();
+					return;
+				}
+
+				this.emitState();
+				return;
+			}
+
+			if (this.shouldAdoptExternalRateChange(element)) {
+				this.lastInteracted = element;
+				this.syncMediaDefaultSpeed(element, element.playbackRate);
+				void this.options.onSpeedPersist(element.playbackRate);
+				this.emitState();
+				return;
+			}
+
+			if (
+				settings.forceSavedSpeedOnLoad &&
+				isTrackedTarget &&
+				Math.abs(element.playbackRate - desiredSpeed) >
+					MediaRegistry.SPEED_EPSILON
+			) {
+				this.setMediaSpeed(element, desiredSpeed);
+				this.emitState();
+				return;
+			}
+
 			this.emitState();
 		};
 
 		const listeners: ListenerBundle = {
-			onInteraction,
+			onMediaInteraction,
 			onPlay,
 			onLoadedMetadata,
 			onRateChange,
 		};
 
-		element.addEventListener("pointerdown", onInteraction, true);
-		element.addEventListener("focus", onInteraction, true);
+		element.addEventListener("pointerdown", onMediaInteraction, true);
+		element.addEventListener("focus", onMediaInteraction, true);
 		element.addEventListener("play", onPlay, true);
 		element.addEventListener("loadedmetadata", onLoadedMetadata, true);
 		element.addEventListener("ratechange", onRateChange, true);
@@ -375,8 +546,12 @@ export class MediaRegistry {
 		const listeners = this.listeners.get(element);
 		if (!listeners) return;
 
-		element.removeEventListener("pointerdown", listeners.onInteraction, true);
-		element.removeEventListener("focus", listeners.onInteraction, true);
+		element.removeEventListener(
+			"pointerdown",
+			listeners.onMediaInteraction,
+			true,
+		);
+		element.removeEventListener("focus", listeners.onMediaInteraction, true);
 		element.removeEventListener("play", listeners.onPlay, true);
 		element.removeEventListener(
 			"loadedmetadata",

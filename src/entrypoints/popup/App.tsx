@@ -71,6 +71,10 @@ function applyPopupState(
 }
 
 async function requestTabState(tabId: number): Promise<PopupState | null> {
+	if (!(await safeTabExists(tabId))) {
+		return null;
+	}
+
 	let bestState: PopupState | null = null;
 
 	try {
@@ -80,8 +84,10 @@ async function requestTabState(tabId: number): Promise<PopupState | null> {
 			{ frameId: 0 },
 		)) as PopupState | null | undefined;
 		bestState = pickBetterState(bestState, directResponse ?? null);
-	} catch {
-		// Fall through to background cache/fallback.
+	} catch (error) {
+		if (!isMissingTabError(error)) {
+			// Fall through to background cache/fallback.
+		}
 	}
 
 	try {
@@ -118,6 +124,20 @@ async function requestPopupStatus(
 		state,
 		unavailableReason: null,
 	};
+}
+
+function isMissingTabError(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	return text.includes("No tab with id");
+}
+
+async function safeTabExists(tabId: number): Promise<boolean> {
+	try {
+		const tab = await browser.tabs.get(tabId);
+		return typeof tab?.id === "number";
+	} catch {
+		return false;
+	}
 }
 
 function parseSpeedInput(input: string, fallback: number): number {
@@ -198,6 +218,15 @@ function App() {
 	) => {
 		const tabId = popupStatus.activeTabId;
 		if (!tabId) return;
+		if (!(await safeTabExists(tabId))) {
+			setPopupStatus((current) => ({
+				...current,
+				activeTabId: null,
+				state: null,
+				unavailableReason: "No active tab.",
+			}));
+			return;
+		}
 
 		try {
 			let response: PopupState | null = null;
@@ -225,7 +254,17 @@ function App() {
 			setPopupStatus((current) =>
 				applyPopupState(current, response ?? current.state),
 			);
-		} catch {
+		} catch (error) {
+			if (isMissingTabError(error)) {
+				setPopupStatus((current) => ({
+					...current,
+					activeTabId: null,
+					state: null,
+					unavailableReason: "No active tab.",
+				}));
+				return;
+			}
+
 			const refreshedState = await requestTabState(tabId);
 			setPopupStatus((current) =>
 				applyPopupState(current, refreshedState ?? current.state),

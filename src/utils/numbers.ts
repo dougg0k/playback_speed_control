@@ -16,5 +16,5 @@ export function formatSpeed(value: number | null | undefined): string {
 export function formatBadgeSpeed(value: number | null | undefined): string {
 	if (typeof value !== "number" || Number.isNaN(value)) return "";
 	const rounded = roundSpeed(value);
-	return `${rounded}`.slice(0, 4);
+	return rounded.toFixed(2).replace(/\.?0+$/, "");
 }
