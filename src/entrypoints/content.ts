@@ -28,8 +28,6 @@ export default defineContentScript({
 	main() {
 		const hostname = getCurrentHostname();
 		const toast = new ToastController();
-		let delayedRefreshTimer: number | null = null;
-		let lateRefreshTimer: number | null = null;
 
 		const resolveSettings = (nextSettings: AppSettings): AppSettings => ({
 			...nextSettings,
@@ -74,28 +72,6 @@ export default defineContentScript({
 
 		const emitCurrentState = () => {
 			registry.updateSettings();
-		};
-
-		const scheduleDelayedRefresh = () => {
-			if (delayedRefreshTimer !== null) {
-				window.clearTimeout(delayedRefreshTimer);
-			}
-
-			delayedRefreshTimer = window.setTimeout(() => {
-				delayedRefreshTimer = null;
-				emitCurrentState();
-			}, 200);
-		};
-
-		const scheduleLateRefresh = () => {
-			if (lateRefreshTimer !== null) {
-				window.clearTimeout(lateRefreshTimer);
-			}
-
-			lateRefreshTimer = window.setTimeout(() => {
-				lateRefreshTimer = null;
-				emitCurrentState();
-			}, 1000);
 		};
 
 		const showActionToast = (
@@ -171,13 +147,8 @@ export default defineContentScript({
 			window.addEventListener("load", emitCurrentState, true);
 			window.addEventListener("pageshow", emitCurrentState, true);
 			window.addEventListener("focus", emitCurrentState, true);
-			document.addEventListener(
-				"visibilitychange",
-				scheduleDelayedRefresh,
-				true,
-			);
-			scheduleDelayedRefresh();
-			scheduleLateRefresh();
+			document.addEventListener("visibilitychange", emitCurrentState, true);
+			emitCurrentState();
 		};
 
 		const stopListeningToStorage = listenForSettingsChanges(
@@ -191,22 +162,12 @@ export default defineContentScript({
 
 		return () => {
 			stopListeningToStorage();
-			if (delayedRefreshTimer !== null) {
-				window.clearTimeout(delayedRefreshTimer);
-			}
-			if (lateRefreshTimer !== null) {
-				window.clearTimeout(lateRefreshTimer);
-			}
 			registry.stop();
 			window.removeEventListener("keydown", handleKeydown, true);
 			window.removeEventListener("load", emitCurrentState, true);
 			window.removeEventListener("pageshow", emitCurrentState, true);
 			window.removeEventListener("focus", emitCurrentState, true);
-			document.removeEventListener(
-				"visibilitychange",
-				scheduleDelayedRefresh,
-				true,
-			);
+			document.removeEventListener("visibilitychange", emitCurrentState, true);
 			browser.runtime.onMessage.removeListener(handleRuntimeMessage);
 		};
 	},

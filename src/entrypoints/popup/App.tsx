@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-	MESSAGE_TYPES,
-	POPUP_STATE_TIMEOUTS_MS,
-	PORT_NAMES,
-} from "@/constants/extension";
+import { MESSAGE_TYPES, PORT_NAMES } from "@/constants/extension";
 import { getSettings, updateSettings } from "@/core/settings";
 import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { normalizeRules } from "@/core/siteRules";
@@ -42,102 +38,6 @@ async function getActiveTab(): Promise<browser.Tabs.Tab | null> {
 	return tab ?? null;
 }
 
-async function withTimeout<T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-	fallback: T,
-): Promise<T> {
-	return await Promise.race([
-		promise,
-		new Promise<T>((resolve) =>
-			window.setTimeout(() => resolve(fallback), timeoutMs),
-		),
-	]);
-}
-
-async function requestTabState(tabId: number): Promise<PopupState | null> {
-	let bestState: PopupState | null = null;
-
-	try {
-		const directResponse = await withTimeout(
-			browser.tabs.sendMessage(
-				tabId,
-				{ type: MESSAGE_TYPES.getState },
-				{ frameId: 0 },
-			) as Promise<PopupState | null | undefined>,
-			POPUP_STATE_TIMEOUTS_MS.directRead,
-			null,
-		);
-		bestState = pickBetterState(bestState, directResponse ?? null);
-	} catch {
-		// Fall through to background cache/fallback.
-	}
-
-	try {
-		const response = await withTimeout(
-			browser.runtime.sendMessage({
-				type: MESSAGE_TYPES.getTabState,
-				payload: { tabId },
-			} satisfies GetTabStateMessage) as Promise<
-				TabStateResponse | null | undefined
-			>,
-			POPUP_STATE_TIMEOUTS_MS.backgroundRead,
-			null,
-		);
-		bestState = pickBetterState(bestState, response?.state ?? null);
-	} catch {
-		// Ignore background fallback failures.
-	}
-
-	return bestState;
-}
-
-async function requestPopupStatus(
-	tabId: number | null,
-	hostname: string,
-): Promise<PopupStatus> {
-	if (!tabId) {
-		return {
-			activeTabId: null,
-			hostname,
-			state: null,
-			unavailableReason: "No active tab.",
-		};
-	}
-
-	let state = await requestTabState(tabId);
-	if (getStateScore(state) < 100) {
-		await new Promise((resolve) =>
-			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryShort),
-		);
-		state = pickBetterState(state, await requestTabState(tabId));
-	}
-	if (getStateScore(state) < 100) {
-		await new Promise((resolve) =>
-			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryMedium),
-		);
-		state = pickBetterState(state, await requestTabState(tabId));
-	}
-	if (getStateScore(state) < 100) {
-		await new Promise((resolve) =>
-			window.setTimeout(resolve, POPUP_STATE_TIMEOUTS_MS.retryLong),
-		);
-		state = pickBetterState(state, await requestTabState(tabId));
-	}
-
-	return {
-		activeTabId: tabId,
-		hostname: state?.hostname || hostname,
-		state,
-		unavailableReason: tabId ? null : "No active tab.",
-	};
-}
-
-function parseSpeedInput(input: string, fallback: number): number {
-	const parsed = Number(input);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 function getStateScore(state: PopupState | null | undefined): number {
 	if (!state) return -1;
 
@@ -170,6 +70,61 @@ function applyPopupState(
 	};
 }
 
+async function requestTabState(tabId: number): Promise<PopupState | null> {
+	let bestState: PopupState | null = null;
+
+	try {
+		const directResponse = (await browser.tabs.sendMessage(
+			tabId,
+			{ type: MESSAGE_TYPES.getState },
+			{ frameId: 0 },
+		)) as PopupState | null | undefined;
+		bestState = pickBetterState(bestState, directResponse ?? null);
+	} catch {
+		// Fall through to background cache/fallback.
+	}
+
+	try {
+		const response = (await browser.runtime.sendMessage({
+			type: MESSAGE_TYPES.getTabState,
+			payload: { tabId },
+		} satisfies GetTabStateMessage)) as TabStateResponse | null | undefined;
+		bestState = pickBetterState(bestState, response?.state ?? null);
+	} catch {
+		// Ignore background fallback failures.
+	}
+
+	return bestState;
+}
+
+async function requestPopupStatus(
+	tabId: number | null,
+	hostname: string,
+): Promise<PopupStatus> {
+	if (!tabId) {
+		return {
+			activeTabId: null,
+			hostname,
+			state: null,
+			unavailableReason: "No active tab.",
+		};
+	}
+
+	const state = await requestTabState(tabId);
+
+	return {
+		activeTabId: tabId,
+		hostname: state?.hostname || hostname,
+		state,
+		unavailableReason: null,
+	};
+}
+
+function parseSpeedInput(input: string, fallback: number): number {
+	const parsed = Number(input);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function App() {
 	const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 	const [popupStatus, setPopupStatus] = useState<PopupStatus>({
@@ -190,7 +145,6 @@ function App() {
 	useEffect(() => {
 		let isMounted = true;
 		let port: browser.Runtime.Port | null = null;
-		let retryTimer: number | null = null;
 		let handlePortMessage: ((message: unknown) => void) | null = null;
 
 		void (async () => {
@@ -228,26 +182,10 @@ function App() {
 			const status = await requestPopupStatus(activeTabId, hostname);
 			if (!isMounted) return;
 			setPopupStatus(status);
-
-			if (activeTabId && !status.state) {
-				retryTimer = window.setTimeout(() => {
-					void requestPopupStatus(activeTabId, hostname).then((nextStatus) => {
-						if (!isMounted) return;
-						setPopupStatus((current) =>
-							current.activeTabId === nextStatus.activeTabId
-								? nextStatus
-								: current,
-						);
-					});
-				}, POPUP_STATE_TIMEOUTS_MS.retryAfterOpen);
-			}
 		})();
 
 		return () => {
 			isMounted = false;
-			if (retryTimer !== null) {
-				window.clearTimeout(retryTimer);
-			}
 			if (port && handlePortMessage) {
 				port.onMessage.removeListener(handlePortMessage);
 				port.disconnect();
@@ -265,31 +203,23 @@ function App() {
 			let response: PopupState | null = null;
 
 			if (message.type === MESSAGE_TYPES.applyTabAction) {
-				response = await withTimeout(
-					browser.tabs.sendMessage(
-						tabId,
-						{
-							type: MESSAGE_TYPES.applyAction,
-							payload: { action: message.payload.action },
-						} satisfies ApplyActionMessage,
-						{ frameId: 0 },
-					) as Promise<PopupState | null | undefined>,
-					POPUP_STATE_TIMEOUTS_MS.action,
-					null,
-				);
+				response = (await browser.tabs.sendMessage(
+					tabId,
+					{
+						type: MESSAGE_TYPES.applyAction,
+						payload: { action: message.payload.action },
+					} satisfies ApplyActionMessage,
+					{ frameId: 0 },
+				)) as PopupState | null | undefined;
 			} else {
-				response = await withTimeout(
-					browser.tabs.sendMessage(
-						tabId,
-						{
-							type: MESSAGE_TYPES.applyExactSpeed,
-							payload: { speed: message.payload.speed },
-						} satisfies ApplyExactSpeedMessage,
-						{ frameId: 0 },
-					) as Promise<PopupState | null | undefined>,
-					POPUP_STATE_TIMEOUTS_MS.action,
-					null,
-				);
+				response = (await browser.tabs.sendMessage(
+					tabId,
+					{
+						type: MESSAGE_TYPES.applyExactSpeed,
+						payload: { speed: message.payload.speed },
+					} satisfies ApplyExactSpeedMessage,
+					{ frameId: 0 },
+				)) as PopupState | null | undefined;
 			}
 
 			setPopupStatus((current) =>
@@ -324,7 +254,6 @@ function App() {
 			window.removeEventListener("keydown", handleKeydown, true);
 		};
 	}, [settings.shortcuts, popupStatus.activeTabId]);
-
 	const saveSettings = async (partial: Partial<AppSettings>) => {
 		const nextSettings = await updateSettings(partial);
 		setSettings(nextSettings);
