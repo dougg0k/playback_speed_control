@@ -33,7 +33,7 @@ body {
 	background: #0b1220;
 	overflow-x: hidden;
 	overflow-y: auto;
-	scrollbar-gutter: stable both-edges;
+	scrollbar-gutter: stable;
 }
 
 body {
