@@ -26,10 +26,14 @@
 
 html,
 body {
-	min-width: 380px;
-	width: 380px;
+	width: 392px;
+	min-width: 392px;
+	max-width: 392px;
 	margin: 0;
 	background: #0b1220;
+	overflow-x: hidden;
+	overflow-y: auto;
+	scrollbar-gutter: stable both-edges;
 }
 
 body {

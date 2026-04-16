@@ -1,11 +1,14 @@
 #root {
-	width: 380px;
+	width: 100%;
+	min-width: 0;
 }
 
 .popup-shell {
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
+	width: 100%;
+	min-width: 0;
 	padding: 14px;
 }
 
@@ -25,20 +28,28 @@
 }
 
 .speed-strip,
-.control-card,
+.control-card {
+	padding: 0;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+}
+
 .settings-group {
-	border: 1px solid var(--surface-border);
-	background: var(--surface-elevated);
-	border-radius: 18px;
-	padding: 14px;
-	box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+	padding: 0;
+	background: transparent;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
 }
 
 .speed-strip {
 	display: flex;
 	align-items: center;
-	min-height: 52px;
-	padding: 12px 14px;
+	min-height: 0;
+	padding: 0 0 12px;
+	border-bottom: 1px solid rgba(148, 163, 184, 0.16);
 }
 
 .speed-readout {
@@ -67,6 +78,7 @@
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
+	padding-top: 12px;
 }
 
 .control-row {
@@ -172,14 +184,23 @@
 .settings-panel {
 	display: flex;
 	flex-direction: column;
-	gap: 12px;
+	gap: 0;
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.settings-group + .settings-group {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid rgba(148, 163, 184, 0.16);
 }
 
 .section-heading {
 	display: flex;
 	flex-direction: column;
 	gap: 2px;
-	margin-bottom: 12px;
+	margin-bottom: 10px;
 }
 
 .section-heading h3 {
