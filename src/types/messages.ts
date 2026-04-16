@@ -1,4 +1,4 @@
-import { MESSAGE_TYPES } from "@/constants/extension";
+import type { MESSAGE_TYPES } from "@/constants/extension";
 import type { ShortcutAction } from "./settings";
 
 export interface PopupState {
