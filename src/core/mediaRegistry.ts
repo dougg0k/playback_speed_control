@@ -1,6 +1,6 @@
 import type { PopupState } from "@/types/messages";
 import type { AppSettings, ShortcutAction } from "@/types/settings";
-import { clampSpeed, roundSpeed } from "@/utils/numbers";
+import { clampSpeed } from "@/utils/numbers";
 
 export interface MediaRegistryOptions {
 	getSettings: () => AppSettings;
@@ -11,104 +11,129 @@ export interface MediaRegistryOptions {
 }
 
 interface ListenerBundle {
-	onMediaInteraction: () => void;
+	onElementInteraction: () => void;
 	onLoadedMetadata: () => void;
-	onCanPlay: () => void;
+	onPlay: () => void;
+	onPause: () => void;
 	onPlaying: () => void;
+	onSeeking: () => void;
+	onSeeked: () => void;
 	onRateChange: () => void;
 }
 
 function isVisibleVideo(element: HTMLMediaElement): boolean {
-	if (!(element instanceof HTMLVideoElement)) return true;
+	if (!(element instanceof HTMLVideoElement)) {
+		return true;
+	}
+
 	const rect = element.getBoundingClientRect();
+	if (rect.width <= 0 || rect.height <= 0) {
+		return false;
+	}
+
 	const style = window.getComputedStyle(element);
-	return (
-		rect.width > 0 &&
-		rect.height > 0 &&
-		style.visibility !== "hidden" &&
-		style.display !== "none"
-	);
+	return style.visibility !== "hidden" && style.display !== "none";
 }
 
 function getMediaArea(element: HTMLMediaElement): number {
-	if (!(element instanceof HTMLVideoElement)) return 0;
+	if (!(element instanceof HTMLVideoElement)) {
+		return 0;
+	}
+
 	const rect = element.getBoundingClientRect();
 	return rect.width * rect.height;
 }
 
-function isPlayableMedia(element: HTMLMediaElement): boolean {
-	return !(element instanceof HTMLVideoElement) || element.readyState >= 0;
+function normalizeObservedSpeed(value: number): number | null {
+	if (!Number.isFinite(value)) {
+		return null;
+	}
+
+	const rounded = Number(value.toFixed(2));
+	if (rounded < 0.1 || rounded > 16) {
+		return null;
+	}
+
+	return rounded;
 }
 
 function isApproximatelyEqual(
 	left: number,
 	right: number,
-	epsilon: number,
+	epsilon = 0.01,
 ): boolean {
 	return Math.abs(left - right) <= epsilon;
 }
 
 export class MediaRegistry {
-	private static readonly USER_INTERACTION_WINDOW_MS = 1200;
+	private static readonly MANUAL_CHANGE_WINDOW_MS = 1500;
 	private static readonly TARGET_INTERACTION_WINDOW_MS = 5000;
-	private static readonly LIFECYCLE_RESTORE_WINDOW_MS = 1200;
-	private static readonly SPEED_EPSILON = 0.01;
+	private static readonly SEEK_SUPPRESSION_WINDOW_MS = 1200;
 
 	private readonly options: MediaRegistryOptions;
 	private readonly media = new Set<HTMLMediaElement>();
 	private readonly listeners = new WeakMap<HTMLMediaElement, ListenerBundle>();
-	private readonly observedRoots = new Map<Node, MutationObserver>();
-	private readonly expectedProgrammaticSpeeds = new WeakMap<
-		HTMLMediaElement,
-		number
-	>();
-	private readonly pendingAdoptionFrames = new WeakMap<
-		HTMLMediaElement,
-		number
-	>();
-	private readonly lifecycleRestoreUntil = new WeakMap<
-		HTMLMediaElement,
-		number
-	>();
-	private readonly pendingLifecycleRestore = new WeakSet<HTMLMediaElement>();
-	private readonly mediaInteractionAt = new WeakMap<HTMLMediaElement, number>();
+	private readonly interactionAt = new WeakMap<HTMLMediaElement, number>();
 	private readonly registrationOrder = new WeakMap<HTMLMediaElement, number>();
-	private readonly extensionOwnedMedia = new WeakSet<HTMLMediaElement>();
+	private readonly startupRestoreDone = new WeakSet<HTMLMediaElement>();
+	private readonly expectedProgrammaticSpeed = new WeakMap<
+		HTMLMediaElement,
+		number
+	>();
+	private readonly transitionSuppressedUntil = new WeakMap<
+		HTMLMediaElement,
+		number
+	>();
+	private readonly pendingTransitionRestore = new WeakSet<HTMLMediaElement>();
+	private readonly observer: MutationObserver;
 	private readonly onDocumentInteraction = () => {
-		const now = performance.now();
-		this.lastUserInteractionAt = now;
-		const target = this.resolveTargetMedia();
-		if (target) {
-			this.mediaInteractionAt.set(target, now);
-		}
+		this.lastDocumentInteractionAt = performance.now();
 	};
 
 	private activeMedia: HTMLMediaElement | null = null;
 	private isStarted = false;
-	private registryOrderCounter = 0;
-	private lastUserInteractionAt = 0;
-	private syncQueued = false;
+	private nextRegistrationOrder = 0;
+	private lastDocumentInteractionAt = 0;
 	private lastStateSignature = "";
 
 	constructor(options: MediaRegistryOptions) {
 		this.options = options;
+		this.observer = new MutationObserver((mutations) => {
+			let changed = false;
+
+			for (const mutation of mutations) {
+				changed = this.syncNodeList(mutation.addedNodes, true) || changed;
+				changed = this.syncNodeList(mutation.removedNodes, false) || changed;
+			}
+
+			if (changed) {
+				this.emitState();
+			}
+		});
 	}
 
 	start(): void {
-		if (this.isStarted) return;
+		if (this.isStarted) {
+			return;
+		}
+
 		this.isStarted = true;
-		this.ensureObservedRoot(document.documentElement);
-		this.registerSubtree(document.documentElement);
+		this.scanDocument();
+		this.observer.observe(document.documentElement, {
+			childList: true,
+			subtree: true,
+		});
 		document.addEventListener("pointerdown", this.onDocumentInteraction, true);
 		document.addEventListener("keydown", this.onDocumentInteraction, true);
-		this.queueSync();
+		this.emitState();
 	}
 
 	stop(): void {
-		for (const observer of this.observedRoots.values()) {
-			observer.disconnect();
+		if (!this.isStarted) {
+			return;
 		}
-		this.observedRoots.clear();
+
+		this.observer.disconnect();
 		document.removeEventListener(
 			"pointerdown",
 			this.onDocumentInteraction,
@@ -123,7 +148,6 @@ export class MediaRegistry {
 		this.media.clear();
 		this.activeMedia = null;
 		this.isStarted = false;
-		this.syncQueued = false;
 		this.lastStateSignature = "";
 	}
 
@@ -138,30 +162,32 @@ export class MediaRegistry {
 
 	getState(): PopupState {
 		this.cleanupDisconnectedMedia();
+		const target = this.resolveTargetMedia();
 		const settings = this.options.getSettings();
-		const eligibleMedia = this.getEligibleMedia();
-		const active = this.resolveTargetMedia();
+		const currentSpeed = target ? this.getDisplayedSpeed(target) : null;
 
 		return {
-			hasMedia: eligibleMedia.length > 0,
-			activeKind: active
-				? active instanceof HTMLVideoElement
+			hasMedia: this.countEligibleMedia() > 0,
+			activeKind: target
+				? target instanceof HTMLVideoElement
 					? "video"
 					: "audio"
 				: null,
-			currentSpeed: active ? roundSpeed(active.playbackRate) : null,
+			currentSpeed,
 			siteDisabled: !settings.enabled,
 			hostname: this.options.hostname,
-			mediaCount: eligibleMedia.length,
+			mediaCount: this.countEligibleMedia(),
 		};
 	}
 
 	async applyAction(action: ShortcutAction): Promise<number | null> {
-		const settings = this.options.getSettings();
 		const target = this.resolveTargetMedia();
-		if (!settings.enabled || !target) return null;
+		const settings = this.options.getSettings();
+		if (!settings.enabled || !target) {
+			return null;
+		}
 
-		const baseSpeed = this.getActionBaseSpeed(target);
+		const baseSpeed = this.getBaseSpeed(target);
 		let nextSpeed = baseSpeed;
 
 		switch (action) {
@@ -183,13 +209,17 @@ export class MediaRegistry {
 	}
 
 	async applyExactSpeed(speed: number): Promise<number | null> {
-		const settings = this.options.getSettings();
 		const target = this.resolveTargetMedia();
-		if (!settings.enabled || !target) return null;
+		const settings = this.options.getSettings();
+		if (!settings.enabled || !target) {
+			return null;
+		}
 
 		const nextSpeed = clampSpeed(speed);
 		this.activeMedia = target;
-		this.setPlaybackRate(target, nextSpeed, { extensionOwned: true });
+		this.startupRestoreDone.add(target);
+		this.pendingTransitionRestore.delete(target);
+		this.setPlaybackRate(target, nextSpeed);
 		await this.options.onSpeedPersist(nextSpeed);
 		this.emitState();
 		return nextSpeed;
@@ -198,586 +228,443 @@ export class MediaRegistry {
 	private emitState(): void {
 		const state = this.getState();
 		const signature = JSON.stringify(state);
-		if (signature === this.lastStateSignature) return;
+		if (signature === this.lastStateSignature) {
+			return;
+		}
+
 		this.lastStateSignature = signature;
 		this.options.onStateChanged(state);
 	}
 
-	private queueSync(): void {
-		if (this.syncQueued) return;
-		this.syncQueued = true;
-		queueMicrotask(() => {
-			this.syncQueued = false;
-			this.cleanupDisconnectedMedia();
-			this.resolveTargetMedia();
-			this.emitState();
-		});
+	private scanDocument(): void {
+		const mediaElements = document.querySelectorAll("video, audio");
+		for (const element of mediaElements) {
+			this.registerMediaElement(element as HTMLMediaElement);
+		}
 	}
 
-	private ensureObservedRoot(root: Node | null): void {
-		if (!root || this.observedRoots.has(root)) return;
+	private syncNodeList(nodes: NodeList, shouldRegister: boolean): boolean {
+		let changed = false;
+		for (const node of nodes) {
+			changed = this.syncNode(node, shouldRegister) || changed;
+		}
+		return changed;
+	}
 
-		const observer = new MutationObserver((mutations) => {
-			let changed = false;
+	private syncNode(node: Node, shouldRegister: boolean): boolean {
+		if (!(node instanceof Element)) {
+			return false;
+		}
 
-			for (const mutation of mutations) {
-				for (const node of Array.from(mutation.addedNodes)) {
-					changed = this.registerSubtree(node) || changed;
-				}
+		let changed = false;
+		if (node instanceof HTMLVideoElement || node instanceof HTMLAudioElement) {
+			changed = shouldRegister
+				? this.registerMediaElement(node)
+				: this.unregisterMediaElement(node);
+		}
 
-				for (const node of Array.from(mutation.removedNodes)) {
-					changed = this.unregisterSubtree(node) || changed;
-				}
-			}
+		const descendants = node.querySelectorAll("video, audio");
+		for (const element of descendants) {
+			changed = shouldRegister
+				? this.registerMediaElement(element as HTMLMediaElement) || changed
+				: this.unregisterMediaElement(element as HTMLMediaElement) || changed;
+		}
 
-			if (changed) {
-				this.queueSync();
-			}
-		});
-
-		observer.observe(root, {
-			childList: true,
-			subtree: true,
-		});
-		this.observedRoots.set(root, observer);
+		return changed;
 	}
 
 	private cleanupDisconnectedMedia(): void {
-		for (const element of Array.from(this.media)) {
-			if (!element.isConnected) {
-				this.detachListeners(element);
-				this.media.delete(element);
+		for (const element of this.media) {
+			if (element.isConnected) {
+				continue;
 			}
-		}
 
-		if (this.activeMedia && !this.activeMedia.isConnected) {
-			this.activeMedia = null;
+			this.detachListeners(element);
+			this.media.delete(element);
+			if (this.activeMedia === element) {
+				this.activeMedia = null;
+			}
 		}
 	}
 
-	private getEligibleMedia(): HTMLMediaElement[] {
+	private isEligibleMedia(element: HTMLMediaElement): boolean {
 		const settings = this.options.getSettings();
-		return Array.from(this.media).filter((element) => {
-			if (!element.isConnected) return false;
-			if (!settings.workOnAudio && element instanceof HTMLAudioElement) {
-				return false;
+		if (!element.isConnected) {
+			return false;
+		}
+
+		if (!settings.workOnAudio && element instanceof HTMLAudioElement) {
+			return false;
+		}
+
+		return true;
+	}
+
+	private countEligibleMedia(): number {
+		let count = 0;
+		for (const element of this.media) {
+			if (this.isEligibleMedia(element)) {
+				count += 1;
 			}
-			return isPlayableMedia(element);
-		});
+		}
+		return count;
+	}
+
+	private getInteractionAt(element: HTMLMediaElement): number {
+		return this.interactionAt.get(element) ?? 0;
 	}
 
 	private getRegistrationOrder(element: HTMLMediaElement): number {
 		return this.registrationOrder.get(element) ?? Number.MAX_SAFE_INTEGER;
 	}
 
-	private getInteractionTimestamp(element: HTMLMediaElement): number {
-		return this.mediaInteractionAt.get(element) ?? 0;
-	}
-
-	private compareCandidates(
-		left: HTMLMediaElement,
-		right: HTMLMediaElement,
-	): number {
-		const interactionDiff =
-			this.getInteractionTimestamp(right) - this.getInteractionTimestamp(left);
-		if (interactionDiff !== 0) return interactionDiff;
-
-		if (left.paused !== right.paused) {
-			return left.paused ? 1 : -1;
-		}
-
-		const leftVisible = isVisibleVideo(left);
-		const rightVisible = isVisibleVideo(right);
-		if (leftVisible !== rightVisible) {
-			return rightVisible ? 1 : -1;
-		}
-
-		const areaDiff = getMediaArea(right) - getMediaArea(left);
-		if (areaDiff !== 0) return areaDiff;
-
-		if (
-			left instanceof HTMLVideoElement !==
-			right instanceof HTMLVideoElement
-		) {
-			return left instanceof HTMLVideoElement ? -1 : 1;
-		}
-
-		return this.getRegistrationOrder(left) - this.getRegistrationOrder(right);
-	}
-
-	private sortCandidates(candidates: HTMLMediaElement[]): HTMLMediaElement[] {
-		return [...candidates].sort((left, right) =>
-			this.compareCandidates(left, right),
+	private hasRecentTargetInteraction(element: HTMLMediaElement): boolean {
+		const at = this.getInteractionAt(element);
+		return (
+			at > 0 &&
+			performance.now() - at <= MediaRegistry.TARGET_INTERACTION_WINDOW_MS
 		);
 	}
 
-	private pickFromBucket(
-		candidates: HTMLMediaElement[],
-	): HTMLMediaElement | null {
-		return this.sortCandidates(candidates)[0] ?? null;
+	private isBetterTarget(
+		candidate: HTMLMediaElement,
+		current: HTMLMediaElement,
+	): boolean {
+		const candidateRecent = this.hasRecentTargetInteraction(candidate);
+		const currentRecent = this.hasRecentTargetInteraction(current);
+		if (candidateRecent !== currentRecent) {
+			return candidateRecent;
+		}
+
+		const candidateInteraction = this.getInteractionAt(candidate);
+		const currentInteraction = this.getInteractionAt(current);
+		if (candidateInteraction !== currentInteraction) {
+			return candidateInteraction > currentInteraction;
+		}
+
+		if (candidate === this.activeMedia || current === this.activeMedia) {
+			return candidate === this.activeMedia;
+		}
+
+		const candidatePlayingVideo =
+			candidate instanceof HTMLVideoElement &&
+			!candidate.paused &&
+			isVisibleVideo(candidate);
+		const currentPlayingVideo =
+			current instanceof HTMLVideoElement &&
+			!current.paused &&
+			isVisibleVideo(current);
+		if (candidatePlayingVideo !== currentPlayingVideo) {
+			return candidatePlayingVideo;
+		}
+
+		const candidateVisibleVideo =
+			candidate instanceof HTMLVideoElement && isVisibleVideo(candidate);
+		const currentVisibleVideo =
+			current instanceof HTMLVideoElement && isVisibleVideo(current);
+		if (candidateVisibleVideo !== currentVisibleVideo) {
+			return candidateVisibleVideo;
+		}
+
+		if (candidate.paused !== current.paused) {
+			return !candidate.paused;
+		}
+
+		if (
+			candidate instanceof HTMLVideoElement !==
+			current instanceof HTMLVideoElement
+		) {
+			return candidate instanceof HTMLVideoElement;
+		}
+
+		const candidateArea = getMediaArea(candidate);
+		const currentArea = getMediaArea(current);
+		if (candidateArea !== currentArea) {
+			return candidateArea > currentArea;
+		}
+
+		return (
+			this.getRegistrationOrder(candidate) < this.getRegistrationOrder(current)
+		);
 	}
 
 	private resolveTargetMedia(
 		preferred: HTMLMediaElement | null = null,
 	): HTMLMediaElement | null {
-		const eligibleMedia = this.getEligibleMedia();
-		if (eligibleMedia.length === 0) {
-			this.activeMedia = null;
-			return null;
-		}
+		this.cleanupDisconnectedMedia();
 
-		if (preferred && eligibleMedia.includes(preferred)) {
-			this.activeMedia = preferred;
-			return preferred;
-		}
+		let winner: HTMLMediaElement | null = null;
+		for (const element of this.media) {
+			if (!this.isEligibleMedia(element)) {
+				continue;
+			}
 
-		const now = performance.now();
-		const recentlyInteracted = eligibleMedia.filter((element) => {
-			const interactedAt = this.getInteractionTimestamp(element);
-			return (
-				interactedAt > 0 &&
-				now - interactedAt <= MediaRegistry.TARGET_INTERACTION_WINDOW_MS
-			);
-		});
-		const recentTarget = this.pickFromBucket(recentlyInteracted);
-		if (recentTarget) {
-			this.activeMedia = recentTarget;
-			return recentTarget;
-		}
+			if (preferred && element === preferred) {
+				this.activeMedia = element;
+				return element;
+			}
 
-		if (this.activeMedia && eligibleMedia.includes(this.activeMedia)) {
-			const currentActive = this.activeMedia;
-			if (!currentActive.paused || isVisibleVideo(currentActive)) {
-				return currentActive;
+			if (!winner || this.isBetterTarget(element, winner)) {
+				winner = element;
 			}
 		}
 
-		const playingVisibleVideos = eligibleMedia.filter(
-			(element) =>
-				element instanceof HTMLVideoElement &&
-				!element.paused &&
-				isVisibleVideo(element),
-		);
-		const playingVisibleVideoTarget = this.pickFromBucket(playingVisibleVideos);
-		if (playingVisibleVideoTarget) {
-			this.activeMedia = playingVisibleVideoTarget;
-			return playingVisibleVideoTarget;
-		}
-
-		const visibleVideos = eligibleMedia.filter(
-			(element) =>
-				element instanceof HTMLVideoElement && isVisibleVideo(element),
-		);
-		const visibleVideoTarget = this.pickFromBucket(visibleVideos);
-		if (visibleVideoTarget) {
-			this.activeMedia = visibleVideoTarget;
-			return visibleVideoTarget;
-		}
-
-		const playingMedia = eligibleMedia.filter((element) => !element.paused);
-		const playingMediaTarget = this.pickFromBucket(playingMedia);
-		if (playingMediaTarget) {
-			this.activeMedia = playingMediaTarget;
-			return playingMediaTarget;
-		}
-
-		const fallback = this.pickFromBucket(eligibleMedia);
-		this.activeMedia = fallback;
-		return fallback;
+		this.activeMedia = winner;
+		return winner;
 	}
 
-	private getDesiredSpeed(): number {
-		return clampSpeed(this.options.getDesiredSpeed());
-	}
-
-	private readObservedPlaybackRate(element: HTMLMediaElement): number | null {
-		const observed = element.playbackRate;
-		if (!Number.isFinite(observed) || observed <= 0) {
-			return null;
-		}
-		return observed;
-	}
-
-	private getObservedPlaybackRate(element: HTMLMediaElement): number | null {
-		const observed = this.readObservedPlaybackRate(element);
-		return observed === null ? null : clampSpeed(observed);
-	}
-
-	private getActionBaseSpeed(element: HTMLMediaElement): number {
-		const observed = this.getObservedPlaybackRate(element);
-		if (observed !== null) {
-			return observed;
-		}
-		return this.getDesiredSpeed();
-	}
-
-	private markLifecycleWindow(element: HTMLMediaElement): void {
-		this.lifecycleRestoreUntil.set(
-			element,
-			performance.now() + MediaRegistry.LIFECYCLE_RESTORE_WINDOW_MS,
-		);
-		this.pendingLifecycleRestore.add(element);
-	}
-
-	private isWithinLifecycleRestoreWindow(element: HTMLMediaElement): boolean {
-		return (this.lifecycleRestoreUntil.get(element) ?? 0) > performance.now();
-	}
-
-	private isLikelyManualRateChange(element: HTMLMediaElement): boolean {
-		const interactedAt = this.getInteractionTimestamp(element);
+	private getBaseSpeed(element: HTMLMediaElement): number {
 		return (
-			interactedAt > 0 &&
-			performance.now() - interactedAt <=
-				MediaRegistry.USER_INTERACTION_WINDOW_MS
+			normalizeObservedSpeed(element.playbackRate) ??
+			clampSpeed(this.options.getDesiredSpeed())
 		);
 	}
 
-	private shouldMaintainDesiredSpeed(element: HTMLMediaElement): boolean {
-		const settings = this.options.getSettings();
-		return (
-			settings.forceSavedSpeedOnLoad || this.extensionOwnedMedia.has(element)
-		);
-	}
-
-	private setPlaybackRate(
-		element: HTMLMediaElement,
-		speed: number,
-		options: { extensionOwned: boolean },
-	): void {
+	private setPlaybackRate(element: HTMLMediaElement, speed: number): void {
 		const nextSpeed = clampSpeed(speed);
-		const observed = this.getObservedPlaybackRate(element);
+		const currentSpeed = normalizeObservedSpeed(element.playbackRate);
 		if (
-			observed !== null &&
-			isApproximatelyEqual(observed, nextSpeed, MediaRegistry.SPEED_EPSILON)
+			currentSpeed !== null &&
+			isApproximatelyEqual(currentSpeed, nextSpeed)
 		) {
-			if (options.extensionOwned) {
-				this.extensionOwnedMedia.add(element);
-			}
 			return;
 		}
 
-		this.expectedProgrammaticSpeeds.set(element, nextSpeed);
-		if (options.extensionOwned) {
-			this.extensionOwnedMedia.add(element);
-		}
+		this.expectedProgrammaticSpeed.set(element, nextSpeed);
 		element.playbackRate = nextSpeed;
 	}
 
-	private enforceDesiredSpeed(element: HTMLMediaElement): void {
-		this.setPlaybackRate(element, this.getDesiredSpeed(), {
-			extensionOwned: true,
-		});
+	private suppressExternalRateAdoption(element: HTMLMediaElement): void {
+		this.transitionSuppressedUntil.set(
+			element,
+			performance.now() + MediaRegistry.SEEK_SUPPRESSION_WINDOW_MS,
+		);
 	}
 
-	private adoptExternalSpeed(element: HTMLMediaElement): void {
-		const adoptedSpeed = this.getObservedPlaybackRate(element);
-		if (adoptedSpeed === null) {
-			return;
+	private isExternalRateAdoptionSuppressed(element: HTMLMediaElement): boolean {
+		if (element.seeking) {
+			return true;
 		}
-		this.activeMedia = element;
-		this.extensionOwnedMedia.add(element);
-		void this.options.onSpeedPersist(adoptedSpeed);
+
+		const suppressedUntil = this.transitionSuppressedUntil.get(element) ?? 0;
+		return suppressedUntil > performance.now();
 	}
 
-	private cancelPendingAdoption(element: HTMLMediaElement): void {
-		const frameId = this.pendingAdoptionFrames.get(element);
-		if (typeof frameId === "number") {
-			cancelAnimationFrame(frameId);
-			this.pendingAdoptionFrames.delete(element);
+	private queueTransitionRestore(element: HTMLMediaElement): void {
+		this.pendingTransitionRestore.add(element);
+	}
+
+	private clearTransitionRestore(element: HTMLMediaElement): void {
+		this.pendingTransitionRestore.delete(element);
+	}
+
+	private hasPendingTransitionRestore(element: HTMLMediaElement): boolean {
+		return this.pendingTransitionRestore.has(element);
+	}
+
+	private getDisplayedSpeed(element: HTMLMediaElement): number | null {
+		const observedSpeed = normalizeObservedSpeed(element.playbackRate);
+		if (!this.hasPendingTransitionRestore(element)) {
+			return observedSpeed;
 		}
+
+		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
+		if (observedSpeed === null) {
+			return desiredSpeed;
+		}
+
+		return isApproximatelyEqual(observedSpeed, desiredSpeed)
+			? observedSpeed
+			: desiredSpeed;
 	}
 
-	private scheduleExternalSpeedAdoption(element: HTMLMediaElement): void {
-		this.cancelPendingAdoption(element);
-		const frameId = requestAnimationFrame(() => {
-			this.pendingAdoptionFrames.delete(element);
-			if (!this.media.has(element)) {
-				return;
-			}
+	private shouldAdoptExternalRateChange(
+		element: HTMLMediaElement,
+		speed: number,
+	): boolean {
+		if (!this.options.getSettings().enabled) {
+			return false;
+		}
 
-			const target = this.resolveTargetMedia(element);
-			if (target !== element) {
-				this.emitState();
-				return;
-			}
+		if (this.resolveTargetMedia(element) !== element) {
+			return false;
+		}
 
-			const observedSpeed = this.getObservedPlaybackRate(element);
-			if (observedSpeed === null) {
-				this.emitState();
-				return;
-			}
-
-			this.adoptExternalSpeed(element);
-			this.emitState();
-		});
-		this.pendingAdoptionFrames.set(element, frameId);
-	}
-
-	private handleLifecycleReady(element: HTMLMediaElement): void {
-		const target = this.resolveTargetMedia(element);
-		if (target !== element) {
-			this.emitState();
-			return;
+		if (this.isExternalRateAdoptionSuppressed(element)) {
+			return false;
 		}
 
 		if (
-			!this.pendingLifecycleRestore.has(element) &&
-			!this.isWithinLifecycleRestoreWindow(element)
+			performance.now() - this.lastDocumentInteractionAt >
+			MediaRegistry.MANUAL_CHANGE_WINDOW_MS
 		) {
-			this.emitState();
+			return false;
+		}
+
+		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
+		return !isApproximatelyEqual(speed, desiredSpeed);
+	}
+
+	private restoreDesiredSpeed(element: HTMLMediaElement): void {
+		const settings = this.options.getSettings();
+		if (!settings.enabled || !settings.forceSavedSpeedOnLoad) {
 			return;
 		}
 
-		const settings = this.options.getSettings();
-		if (settings.enabled && settings.forceSavedSpeedOnLoad) {
-			const desiredSpeed = this.getDesiredSpeed();
-			const observedSpeed = this.getObservedPlaybackRate(element);
-			if (
-				observedSpeed === null ||
-				!isApproximatelyEqual(
-					observedSpeed,
-					desiredSpeed,
-					MediaRegistry.SPEED_EPSILON,
-				)
-			) {
-				this.enforceDesiredSpeed(element);
-			}
+		if (this.resolveTargetMedia(element) !== element) {
+			return;
 		}
 
-		this.pendingLifecycleRestore.delete(element);
-		this.emitState();
+		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
+		const currentSpeed = normalizeObservedSpeed(element.playbackRate);
+		if (
+			currentSpeed !== null &&
+			isApproximatelyEqual(currentSpeed, desiredSpeed)
+		) {
+			return;
+		}
+
+		this.setPlaybackRate(element, desiredSpeed);
 	}
 
-	private registerSubtree(node: Node): boolean {
-		let changed = false;
+	private restoreStartupSpeed(element: HTMLMediaElement): void {
+		if (this.startupRestoreDone.has(element)) {
+			return;
+		}
 
-		const visit = (candidate: Node): void => {
-			if (
-				candidate instanceof HTMLVideoElement ||
-				candidate instanceof HTMLAudioElement
-			) {
-				changed = this.registerMediaElement(candidate) || changed;
-			}
-
-			if (!(candidate instanceof Element || candidate instanceof ShadowRoot)) {
-				return;
-			}
-
-			const ownerDocument = candidate.ownerDocument ?? document;
-			const walker = ownerDocument.createTreeWalker(
-				candidate,
-				NodeFilter.SHOW_ELEMENT,
-			);
-
-			let current: Node | null = walker.currentNode;
-			while (current) {
-				if (
-					current instanceof HTMLVideoElement ||
-					current instanceof HTMLAudioElement
-				) {
-					changed = this.registerMediaElement(current) || changed;
-				}
-
-				if (current instanceof Element && current.shadowRoot) {
-					this.ensureObservedRoot(current.shadowRoot);
-					visit(current.shadowRoot);
-				}
-
-				current = walker.nextNode();
-			}
-		};
-
-		visit(node);
-		return changed;
+		this.startupRestoreDone.add(element);
+		this.restoreDesiredSpeed(element);
 	}
 
-	private unregisterSubtree(node: Node): boolean {
-		let changed = false;
+	private restoreSpeedAfterTransition(element: HTMLMediaElement): void {
+		if (!this.hasPendingTransitionRestore(element)) {
+			return;
+		}
 
-		const visit = (candidate: Node): void => {
-			if (
-				candidate instanceof HTMLVideoElement ||
-				candidate instanceof HTMLAudioElement
-			) {
-				changed = this.unregisterMediaElement(candidate) || changed;
-			}
-
-			if (!(candidate instanceof Element || candidate instanceof ShadowRoot)) {
-				return;
-			}
-
-			const ownerDocument = candidate.ownerDocument ?? document;
-			const walker = ownerDocument.createTreeWalker(
-				candidate,
-				NodeFilter.SHOW_ELEMENT,
-			);
-
-			let current: Node | null = walker.currentNode;
-			while (current) {
-				if (
-					current instanceof HTMLVideoElement ||
-					current instanceof HTMLAudioElement
-				) {
-					changed = this.unregisterMediaElement(current) || changed;
-				}
-
-				if (current instanceof Element && current.shadowRoot) {
-					visit(current.shadowRoot);
-				}
-
-				current = walker.nextNode();
-			}
-		};
-
-		visit(node);
-		return changed;
+		this.clearTransitionRestore(element);
+		this.restoreDesiredSpeed(element);
 	}
 
 	private registerMediaElement(element: HTMLMediaElement): boolean {
-		if (this.media.has(element)) return false;
-		this.media.add(element);
-		this.registrationOrder.set(element, this.registryOrderCounter++);
+		if (this.media.has(element)) {
+			return false;
+		}
 
-		const onMediaInteraction = () => {
+		this.media.add(element);
+		this.registrationOrder.set(element, this.nextRegistrationOrder++);
+
+		const onElementInteraction = () => {
 			const now = performance.now();
-			this.lastUserInteractionAt = now;
-			this.mediaInteractionAt.set(element, now);
-			this.activeMedia = this.resolveTargetMedia(element);
+			this.lastDocumentInteractionAt = now;
+			this.interactionAt.set(element, now);
+			this.activeMedia = element;
 			this.emitState();
 		};
 
 		const onLoadedMetadata = () => {
-			this.markLifecycleWindow(element);
-			this.resolveTargetMedia(element);
+			this.activeMedia = this.resolveTargetMedia(element);
 			this.emitState();
 		};
 
-		const onCanPlay = () => {
-			this.handleLifecycleReady(element);
+		const onPlay = () => {
+			this.activeMedia = element;
+			this.suppressExternalRateAdoption(element);
+			this.queueTransitionRestore(element);
+		};
+
+		const onPause = () => {
+			this.activeMedia = element;
+			this.suppressExternalRateAdoption(element);
 		};
 
 		const onPlaying = () => {
-			this.handleLifecycleReady(element);
+			this.activeMedia = element;
+			this.restoreStartupSpeed(element);
+			this.restoreSpeedAfterTransition(element);
+			this.emitState();
+		};
+
+		const onSeeking = () => {
+			this.activeMedia = element;
+			this.queueTransitionRestore(element);
+			this.suppressExternalRateAdoption(element);
+		};
+
+		const onSeeked = () => {
+			this.activeMedia = element;
+			this.suppressExternalRateAdoption(element);
+			this.restoreSpeedAfterTransition(element);
+			this.emitState();
 		};
 
 		const onRateChange = () => {
-			const expectedProgrammaticSpeed =
-				this.expectedProgrammaticSpeeds.get(element);
-			if (typeof expectedProgrammaticSpeed === "number") {
-				const observedSpeed = this.getObservedPlaybackRate(element);
-				if (
-					observedSpeed !== null &&
-					isApproximatelyEqual(
-						observedSpeed,
-						expectedProgrammaticSpeed,
-						MediaRegistry.SPEED_EPSILON,
-					)
-				) {
-					this.expectedProgrammaticSpeeds.delete(element);
+			const observedSpeed = normalizeObservedSpeed(element.playbackRate);
+			if (observedSpeed === null) {
+				this.emitState();
+				return;
+			}
+
+			const expectedSpeed = this.expectedProgrammaticSpeed.get(element);
+			if (typeof expectedSpeed === "number") {
+				this.expectedProgrammaticSpeed.delete(element);
+				if (isApproximatelyEqual(observedSpeed, expectedSpeed)) {
 					this.emitState();
 					return;
 				}
-
-				this.expectedProgrammaticSpeeds.delete(element);
 			}
 
-			const target = this.resolveTargetMedia(element);
-			if (target !== element) {
-				this.emitState();
-				return;
-			}
-
-			const settings = this.options.getSettings();
-			if (!settings.enabled) {
-				this.emitState();
-				return;
-			}
-
-			const observedSpeed = this.getObservedPlaybackRate(element);
-			if (observedSpeed === null) {
-				if (
-					this.shouldMaintainDesiredSpeed(element) &&
-					!this.isWithinLifecycleRestoreWindow(element)
-				) {
-					this.enforceDesiredSpeed(element);
-				}
-				this.emitState();
-				return;
-			}
-
-			if (this.isWithinLifecycleRestoreWindow(element)) {
-				if (
-					this.shouldMaintainDesiredSpeed(element) &&
-					!isApproximatelyEqual(
-						observedSpeed,
-						this.getDesiredSpeed(),
-						MediaRegistry.SPEED_EPSILON,
-					)
-				) {
-					this.enforceDesiredSpeed(element);
-				}
-				this.emitState();
-				return;
-			}
-
-			if (this.isLikelyManualRateChange(element)) {
-				this.scheduleExternalSpeedAdoption(element);
-				this.emitState();
-				return;
-			}
-
-			if (this.shouldMaintainDesiredSpeed(element)) {
-				const desiredSpeed = this.getDesiredSpeed();
+			if (!this.shouldAdoptExternalRateChange(element, observedSpeed)) {
 				if (
 					!isApproximatelyEqual(
 						observedSpeed,
-						desiredSpeed,
-						MediaRegistry.SPEED_EPSILON,
+						clampSpeed(this.options.getDesiredSpeed()),
 					)
 				) {
-					this.enforceDesiredSpeed(element);
+					this.queueTransitionRestore(element);
 				}
+				this.emitState();
+				return;
 			}
+
+			this.activeMedia = element;
+			void this.options.onSpeedPersist(observedSpeed);
 			this.emitState();
 		};
 
 		const listeners: ListenerBundle = {
-			onMediaInteraction,
+			onElementInteraction,
 			onLoadedMetadata,
-			onCanPlay,
+			onPlay,
+			onPause,
 			onPlaying,
+			onSeeking,
+			onSeeked,
 			onRateChange,
 		};
 
-		element.addEventListener("pointerdown", onMediaInteraction, true);
-		element.addEventListener("focus", onMediaInteraction, true);
+		element.addEventListener("pointerdown", onElementInteraction, true);
+		element.addEventListener("focus", onElementInteraction, true);
 		element.addEventListener("loadedmetadata", onLoadedMetadata, true);
-		element.addEventListener("canplay", onCanPlay, true);
+		element.addEventListener("play", onPlay, true);
+		element.addEventListener("pause", onPause, true);
 		element.addEventListener("playing", onPlaying, true);
+		element.addEventListener("seeking", onSeeking, true);
+		element.addEventListener("seeked", onSeeked, true);
 		element.addEventListener("ratechange", onRateChange, true);
 		this.listeners.set(element, listeners);
 
-		if (element.readyState > 0 || !element.paused) {
-			queueMicrotask(() => {
-				if (!this.media.has(element)) return;
-				this.markLifecycleWindow(element);
-				if (
-					element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ||
-					!element.paused
-				) {
-					this.handleLifecycleReady(element);
-				} else {
-					this.emitState();
-				}
-			});
+		if (element.readyState >= HTMLMediaElement.HAVE_METADATA) {
+			this.activeMedia = this.resolveTargetMedia(element);
 		}
 
 		return true;
 	}
 
 	private unregisterMediaElement(element: HTMLMediaElement): boolean {
-		if (!this.media.has(element)) return false;
-		this.cancelPendingAdoption(element);
+		if (!this.media.has(element)) {
+			return false;
+		}
+
 		this.detachListeners(element);
 		this.media.delete(element);
 		if (this.activeMedia === element) {
@@ -788,21 +675,26 @@ export class MediaRegistry {
 
 	private detachListeners(element: HTMLMediaElement): void {
 		const listeners = this.listeners.get(element);
-		if (!listeners) return;
+		if (!listeners) {
+			return;
+		}
 
 		element.removeEventListener(
 			"pointerdown",
-			listeners.onMediaInteraction,
+			listeners.onElementInteraction,
 			true,
 		);
-		element.removeEventListener("focus", listeners.onMediaInteraction, true);
+		element.removeEventListener("focus", listeners.onElementInteraction, true);
 		element.removeEventListener(
 			"loadedmetadata",
 			listeners.onLoadedMetadata,
 			true,
 		);
-		element.removeEventListener("canplay", listeners.onCanPlay, true);
+		element.removeEventListener("play", listeners.onPlay, true);
+		element.removeEventListener("pause", listeners.onPause, true);
 		element.removeEventListener("playing", listeners.onPlaying, true);
+		element.removeEventListener("seeking", listeners.onSeeking, true);
+		element.removeEventListener("seeked", listeners.onSeeked, true);
 		element.removeEventListener("ratechange", listeners.onRateChange, true);
 		this.listeners.delete(element);
 	}

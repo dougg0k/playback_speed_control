@@ -3,7 +3,6 @@ import {
 	BADGE_VALIDATION,
 	MESSAGE_TYPES,
 	PORT_NAMES,
-	STORAGE_KEYS,
 } from "@/constants/extension";
 import type {
 	ApplyActionMessage,
@@ -26,11 +25,6 @@ interface FrameStateEntry {
 	state: PopupState;
 }
 
-interface PersistedTabState {
-	frameId: number;
-	state: PopupState;
-}
-
 type BadgeApi = {
 	setBadgeBackgroundColor(details: {
 		tabId?: number;
@@ -42,16 +36,7 @@ type BadgeApi = {
 	}): Promise<unknown> | void;
 };
 
-type StorageAreaLike = {
-	get(
-		keys?: string | string[] | Record<string, unknown> | null,
-	): Promise<Record<string, unknown>>;
-	set(items: Record<string, unknown>): Promise<void>;
-	remove(keys: string | string[]): Promise<void>;
-};
-
 const frameStatesByTab = new Map<number, Map<number, PopupState>>();
-const lastSuccessfulFrameByTab = new Map<number, number>();
 const popupPorts = new Set<browser.Runtime.Port>();
 
 function isMissingTabError(error: unknown): boolean {
@@ -82,58 +67,6 @@ function getBadgeApi(): BadgeApi | null {
 	);
 }
 
-function getPersistedTabStateKey(tabId: number): string {
-	return `${STORAGE_KEYS.tabStatePrefix}${tabId}`;
-}
-
-function getTabStateStorageArea(): StorageAreaLike {
-	const maybeStorage = browser.storage as typeof browser.storage & {
-		session?: StorageAreaLike;
-	};
-
-	return maybeStorage.session ?? browser.storage.local;
-}
-
-async function clearLocalTabStateFallbackCache(): Promise<void> {
-	if (
-		(browser.storage as typeof browser.storage & { session?: StorageAreaLike })
-			.session
-	) {
-		return;
-	}
-
-	const storageArea = getTabStateStorageArea();
-	const stored = await storageArea.get(null);
-	const keys = Object.keys(stored).filter((key) =>
-		key.startsWith(STORAGE_KEYS.tabStatePrefix),
-	);
-	if (keys.length > 0) {
-		await storageArea.remove(keys);
-	}
-}
-
-async function readPersistedTabState(
-	tabId: number,
-): Promise<PersistedTabState | null> {
-	const key = getPersistedTabStateKey(tabId);
-	const stored = await getTabStateStorageArea().get(key);
-	return (stored[key] as PersistedTabState | undefined) ?? null;
-}
-
-async function writePersistedTabState(
-	tabId: number,
-	entry: FrameStateEntry | null,
-): Promise<void> {
-	const key = getPersistedTabStateKey(tabId);
-	const storageArea = getTabStateStorageArea();
-
-	if (entry) {
-		await storageArea.set({ [key]: entry });
-	} else {
-		await storageArea.remove(key);
-	}
-}
-
 function getTabFrameStates(tabId: number): Map<number, PopupState> {
 	let states = frameStatesByTab.get(tabId);
 	if (!states) {
@@ -143,125 +76,77 @@ function getTabFrameStates(tabId: number): Map<number, PopupState> {
 	return states;
 }
 
-function hasLiveFrameState(tabId: number): boolean {
-	const states = frameStatesByTab.get(tabId);
-	return Boolean(states && states.size > 0);
-}
-
 function setFrameState(
 	tabId: number,
 	frameId: number,
 	state: PopupState,
 ): void {
 	getTabFrameStates(tabId).set(frameId, state);
-	if (state.hasMedia) {
-		lastSuccessfulFrameByTab.set(tabId, frameId);
-	}
 }
 
 function removeFrameState(tabId: number, frameId: number): void {
 	const states = frameStatesByTab.get(tabId);
-	if (!states) return;
+	if (!states) {
+		return;
+	}
+
 	states.delete(frameId);
 	if (states.size === 0) {
 		frameStatesByTab.delete(tabId);
 	}
-	if (lastSuccessfulFrameByTab.get(tabId) === frameId) {
-		lastSuccessfulFrameByTab.delete(tabId);
-	}
 }
 
-async function hydratePersistedTabState(
-	tabId: number,
-): Promise<FrameStateEntry | null> {
-	if (hasLiveFrameState(tabId)) {
-		return getBestEntry(tabId);
-	}
-
-	const persisted = await readPersistedTabState(tabId);
-	if (persisted) {
-		setFrameState(tabId, persisted.frameId, persisted.state);
-		return persisted;
-	}
-
-	return null;
-}
-
-async function clearTabState(tabId: number): Promise<void> {
+function clearTabState(tabId: number): void {
 	frameStatesByTab.delete(tabId);
-	lastSuccessfulFrameByTab.delete(tabId);
-	await writePersistedTabState(tabId, null);
 }
 
-function getFrameEntries(tabId: number): FrameStateEntry[] {
-	const states = frameStatesByTab.get(tabId);
-	if (!states) return [];
-	return Array.from(states.entries()).map(([frameId, state]) => ({
-		frameId,
-		state,
-	}));
-}
-
-function compareFrameEntries(
-	tabId: number,
-	left: FrameStateEntry,
-	right: FrameStateEntry,
-): number {
-	const lastSuccessfulFrameId = lastSuccessfulFrameByTab.get(tabId);
-	if (
-		lastSuccessfulFrameId === left.frameId ||
-		lastSuccessfulFrameId === right.frameId
-	) {
-		if (
-			lastSuccessfulFrameId === left.frameId &&
-			lastSuccessfulFrameId !== right.frameId
-		) {
-			return -1;
-		}
-		if (
-			lastSuccessfulFrameId === right.frameId &&
-			lastSuccessfulFrameId !== left.frameId
-		) {
-			return 1;
-		}
+function shouldReplaceBestState(
+	next: FrameStateEntry,
+	current: FrameStateEntry,
+): boolean {
+	if (next.state.hasMedia !== current.state.hasMedia) {
+		return next.state.hasMedia;
 	}
 
-	if (left.state.hasMedia !== right.state.hasMedia) {
-		return left.state.hasMedia ? -1 : 1;
+	if (next.state.siteDisabled !== current.state.siteDisabled) {
+		return !next.state.siteDisabled;
 	}
 
-	if (left.state.siteDisabled !== right.state.siteDisabled) {
-		return left.state.siteDisabled ? 1 : -1;
+	if (next.state.activeKind !== current.state.activeKind) {
+		if (next.state.activeKind === "video") return true;
+		if (current.state.activeKind === "video") return false;
+		if (next.state.activeKind === "audio") return true;
+		if (current.state.activeKind === "audio") return false;
 	}
 
-	if (left.state.activeKind !== right.state.activeKind) {
-		if (left.state.activeKind === "video") return -1;
-		if (right.state.activeKind === "video") return 1;
-		if (left.state.activeKind === "audio") return -1;
-		if (right.state.activeKind === "audio") return 1;
+	const nextHasSpeed = typeof next.state.currentSpeed === "number";
+	const currentHasSpeed = typeof current.state.currentSpeed === "number";
+	if (nextHasSpeed !== currentHasSpeed) {
+		return nextHasSpeed;
 	}
 
-	const leftHasSpeed = typeof left.state.currentSpeed === "number";
-	const rightHasSpeed = typeof right.state.currentSpeed === "number";
-	if (leftHasSpeed !== rightHasSpeed) {
-		return leftHasSpeed ? -1 : 1;
+	if (next.state.mediaCount !== current.state.mediaCount) {
+		return next.state.mediaCount > current.state.mediaCount;
 	}
 
-	if (left.state.mediaCount !== right.state.mediaCount) {
-		return right.state.mediaCount - left.state.mediaCount;
-	}
-
-	return left.frameId - right.frameId;
-}
-
-function getOrderedFrameEntries(tabId: number): FrameStateEntry[] {
-	const entries = getFrameEntries(tabId);
-	entries.sort((left, right) => compareFrameEntries(tabId, left, right));
-	return entries;
+	return next.frameId < current.frameId;
 }
 
 function getBestEntry(tabId: number): FrameStateEntry | null {
-	return getOrderedFrameEntries(tabId)[0] ?? null;
+	const states = frameStatesByTab.get(tabId);
+	if (!states) {
+		return null;
+	}
+
+	let best: FrameStateEntry | null = null;
+	for (const [frameId, state] of states.entries()) {
+		const entry = { frameId, state };
+		if (!best || shouldReplaceBestState(entry, best)) {
+			best = entry;
+		}
+	}
+
+	return best;
 }
 
 function isBadgeStateStable(state: PopupState | null): state is PopupState {
@@ -282,7 +167,7 @@ function notifyPopupPorts(tabId: number, state: PopupState | null): void {
 		payload: { tabId, state },
 	};
 
-	for (const port of Array.from(popupPorts)) {
+	for (const port of popupPorts) {
 		try {
 			port.postMessage(message);
 		} catch {
@@ -292,39 +177,27 @@ function notifyPopupPorts(tabId: number, state: PopupState | null): void {
 }
 
 async function applyBadge(tabId: number): Promise<void> {
-	const entry = getBestEntry(tabId);
-	const state = entry?.state ?? null;
-	const preserveExistingBadge = Boolean(
-		state &&
-			typeof state.currentSpeed === "number" &&
-			Number.isFinite(state.currentSpeed) &&
-			state.currentSpeed > 0 &&
-			state.currentSpeed < BADGE_VALIDATION.minStableSpeed,
-	);
-
-	if (!preserveExistingBadge) {
-		const stableBadgeState =
-			isBadgeStateStable(state) && !state.siteDisabled ? state : null;
-		const badgeText = stableBadgeState
-			? formatBadgeSpeed(stableBadgeState.currentSpeed)
-			: "";
-		const badgeColor = state?.siteDisabled
-			? BADGE_COLORS.disabled
-			: BADGE_COLORS.active;
-		const badgeApi = getBadgeApi();
-
-		if (badgeApi) {
-			await Promise.resolve(
-				badgeApi.setBadgeBackgroundColor({
-					tabId,
-					color: badgeColor,
-				}),
-			);
-			await Promise.resolve(badgeApi.setBadgeText({ tabId, text: badgeText }));
-		}
+	const state = getBestEntry(tabId)?.state ?? null;
+	const stableState =
+		isBadgeStateStable(state) && !state.siteDisabled ? state : null;
+	const badgeApi = getBadgeApi();
+	if (!badgeApi) {
+		notifyPopupPorts(tabId, state);
+		return;
 	}
 
-	await writePersistedTabState(tabId, entry);
+	await Promise.resolve(
+		badgeApi.setBadgeBackgroundColor({
+			tabId,
+			color: state?.siteDisabled ? BADGE_COLORS.disabled : BADGE_COLORS.active,
+		}),
+	);
+	await Promise.resolve(
+		badgeApi.setBadgeText({
+			tabId,
+			text: stableState ? formatBadgeSpeed(stableState.currentSpeed) : "",
+		}),
+	);
 	notifyPopupPorts(tabId, state);
 }
 
@@ -334,7 +207,7 @@ async function sendContentMessage(
 	frameId: number,
 ): Promise<PopupState | null> {
 	if (!(await tabExists(tabId))) {
-		await clearTabState(tabId);
+		clearTabState(tabId);
 		return null;
 	}
 
@@ -346,47 +219,73 @@ async function sendContentMessage(
 	} catch (error) {
 		removeFrameState(tabId, frameId);
 		if (isMissingTabError(error)) {
-			await clearTabState(tabId);
+			clearTabState(tabId);
 		}
 		return null;
 	}
 }
 
-function getPreferredFrameIds(tabId: number): number[] {
-	const frameIds = getOrderedFrameEntries(tabId).map((entry) => entry.frameId);
-	frameIds.push(0);
-	return Array.from(new Set(frameIds));
+function getKnownFrameIds(tabId: number): number[] {
+	const frameIds: number[] = [0];
+	const states = frameStatesByTab.get(tabId);
+	if (!states) {
+		return frameIds;
+	}
+
+	for (const frameId of states.keys()) {
+		if (!frameIds.includes(frameId)) {
+			frameIds.push(frameId);
+		}
+	}
+
+	return frameIds;
 }
 
-async function refreshPreferredFrameStates(
-	tabId: number,
-): Promise<FrameStateEntry | null> {
-	const frameIds = getPreferredFrameIds(tabId);
-
-	for (const frameId of frameIds) {
+async function refreshKnownFrameStates(tabId: number): Promise<void> {
+	for (const frameId of getKnownFrameIds(tabId)) {
 		const state = await sendContentMessage(
 			tabId,
 			{ type: MESSAGE_TYPES.getState },
 			frameId,
 		);
-		if (!state) continue;
+		if (!state) {
+			continue;
+		}
+
+		if (!state.hasMedia && frameId !== 0) {
+			removeFrameState(tabId, frameId);
+			continue;
+		}
 
 		setFrameState(tabId, frameId, state);
 	}
+}
 
-	await applyBadge(tabId);
-	return getBestEntry(tabId);
+function getRelayFrameOrder(tabId: number): number[] {
+	const order: number[] = [];
+	const bestFrameId = getBestEntry(tabId)?.frameId;
+	if (typeof bestFrameId === "number") {
+		order.push(bestFrameId);
+	}
+
+	for (const frameId of getKnownFrameIds(tabId)) {
+		if (!order.includes(frameId)) {
+			order.push(frameId);
+		}
+	}
+
+	return order;
 }
 
 async function getTabState(tabId: number): Promise<TabStateResponse> {
 	if (!(await tabExists(tabId))) {
-		await clearTabState(tabId);
+		clearTabState(tabId);
 		return { state: null };
 	}
 
-	await hydratePersistedTabState(tabId);
-	const entry = await refreshPreferredFrameStates(tabId);
-	return { state: entry?.state ?? null };
+	await refreshKnownFrameStates(tabId);
+	await applyBadge(tabId);
+	return { state: getBestEntry(tabId)?.state ?? null };
 }
 
 async function relayToBestFrame(
@@ -394,16 +293,22 @@ async function relayToBestFrame(
 	message: ContentRequestMessage,
 ): Promise<TabStateResponse> {
 	if (!(await tabExists(tabId))) {
-		await clearTabState(tabId);
+		clearTabState(tabId);
 		return { state: null };
 	}
 
-	await hydratePersistedTabState(tabId);
-	const frameIds = getPreferredFrameIds(tabId);
+	await refreshKnownFrameStates(tabId);
 
-	for (const frameId of frameIds) {
+	for (const frameId of getRelayFrameOrder(tabId)) {
 		const response = await sendContentMessage(tabId, message, frameId);
-		if (!response) continue;
+		if (!response) {
+			continue;
+		}
+
+		if (!response.hasMedia && frameId !== 0) {
+			removeFrameState(tabId, frameId);
+			continue;
+		}
 
 		setFrameState(tabId, frameId, response);
 		if (!response.hasMedia) {
@@ -419,12 +324,12 @@ async function relayToBestFrame(
 }
 
 export default defineBackground(() => {
-	void clearLocalTabStateFallbackCache();
-
 	popupPorts.clear();
 
 	browser.runtime.onConnect.addListener((port) => {
-		if (port.name !== PORT_NAMES.popup) return;
+		if (port.name !== PORT_NAMES.popup) {
+			return;
+		}
 
 		popupPorts.add(port);
 		port.onDisconnect.addListener(() => {
@@ -437,10 +342,17 @@ export default defineBackground(() => {
 		if (snapshotMessage?.type === MESSAGE_TYPES.stateSnapshot) {
 			const tabId = sender.tab?.id;
 			const frameId = sender.frameId ?? 0;
-			if (typeof tabId !== "number") return undefined;
+			if (typeof tabId !== "number") {
+				return undefined;
+			}
 
 			void (async () => {
-				setFrameState(tabId, frameId, snapshotMessage.payload);
+				if (!snapshotMessage.payload.hasMedia && frameId !== 0) {
+					removeFrameState(tabId, frameId);
+				} else {
+					setFrameState(tabId, frameId, snapshotMessage.payload);
+				}
+
 				await applyBadge(tabId);
 			})();
 			return undefined;
@@ -475,19 +387,21 @@ export default defineBackground(() => {
 	});
 
 	browser.tabs.onRemoved.addListener((tabId) => {
-		void clearTabState(tabId);
+		clearTabState(tabId);
 	});
 
 	browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-		if (changeInfo.status === "loading") {
-			void (async () => {
-				await clearTabState(tabId);
-				const badgeApi = getBadgeApi();
-				if (badgeApi) {
-					await Promise.resolve(badgeApi.setBadgeText({ tabId, text: "" }));
-				}
-				notifyPopupPorts(tabId, null);
-			})();
+		if (changeInfo.status !== "loading") {
+			return;
 		}
+
+		void (async () => {
+			clearTabState(tabId);
+			const badgeApi = getBadgeApi();
+			if (badgeApi) {
+				await Promise.resolve(badgeApi.setBadgeText({ tabId, text: "" }));
+			}
+			notifyPopupPorts(tabId, null);
+		})();
 	});
 });

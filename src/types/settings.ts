@@ -24,7 +24,7 @@ export interface AppSettings {
 export interface SavedSpeedEntry {
 	value: number;
 	updatedAt: number;
-	source?: "explicit";
+	restorable?: true;
 }
 
 export interface PersistedPlaybackState {

@@ -220,7 +220,7 @@ Selected behavior:
 - if the user changes speed through the player UI or player shortcuts, that observed speed becomes the new current extension speed
 - startup/internal player `ratechange` events must not be treated as user intent
 - startup/internal player `ratechange` events must not overwrite remembered speed
-- legacy remembered-speed data without current provenance metadata must not be auto-restored as authoritative speed
+- player speed changes that happen right after a real user interaction with that player become the new current extension speed
 
 ### Save scope
 
@@ -247,8 +247,18 @@ Implementation rules:
 - non-media pages must not intercept extension shortcuts
 - restoring speed during media initialization must not poison remembered speed with fallback or transient player values such as the clamp floor
 - extension runtime must avoid repeated whole-document rescans in normal steady-state control paths
+- subtree discovery must use direct selector-based checks rather than recursive DOM walking
 - subframes without eligible media must not emit dormant state, win frame selection, or become action targets
 - startup speed restore must wait for a playback-ready lifecycle point rather than forcing speed during very early media initialization
+- startup restore should be a bounded one-shot application for the current media lifecycle, not an ongoing fight loop against repeated player-driven rate changes
+- the extension speed is the active speed state; when the user changes speed through the player after a real interaction, that observed speed becomes the new extension speed
+- remembered speed used for restore must come only from trusted explicit saves written by the current runtime, not legacy or ambiguous entries
+- non-speed events such as seeking, seeked, waiting, canplay, play, playing, metadata refresh, and generic timeline movement must never be treated as speed intent or overwrite remembered speed
+- scrubbing or jumping to another playback position must not change speed; if a site resets speed during seek, the extension may reapply the already selected speed after the seek settles, but it must not adopt the temporary reset as the new speed
+- generic document interaction is not enough to infer speed intent when the surrounding media lifecycle indicates a seek or other non-speed transition
+- pause, resume, play, playing, and related readiness transitions must not reset speed, overwrite remembered speed, or be interpreted as speed intent
+- toolbar badge and popup speed state must not flicker or refresh just because the player emitted a temporary speed change during seek, pause, resume, or other non-speed lifecycle churn
+- selected speed and transient player churn are separate concerns; the extension may restore the selected speed after a protected transition, but it must not present that transition as a real speed change to the user interface
 
 ## 5.3 Audio support
 
@@ -536,6 +546,7 @@ interface SitePlaybackState {
 Keep storage intentionally simple. Do not introduce complex inheritance/state layers in v1.
 
 Store remembered speed with enough metadata to distinguish current trusted entries from legacy ambiguous entries.
+Keep the remembered-speed shape simple and avoid adding mode-selection or ownership-state branches to the user-facing product.
 
 ---
 

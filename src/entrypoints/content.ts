@@ -22,38 +22,20 @@ import { getCurrentHostname } from "@/utils/urls";
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/utils/define-content-script";
 
-function containsMediaNode(root: Node | null): boolean {
-	if (!root) return false;
-	if (root instanceof HTMLVideoElement || root instanceof HTMLAudioElement) {
-		return true;
-	}
-
-	if (!(root instanceof Element || root instanceof ShadowRoot)) {
+function nodeHasMedia(node: Node | null): boolean {
+	if (!(node instanceof Element)) {
 		return false;
 	}
 
-	const ownerDocument = root.ownerDocument ?? document;
-	const walker = ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-	let current: Node | null = walker.currentNode;
-
-	while (current) {
-		if (
-			current instanceof HTMLVideoElement ||
-			current instanceof HTMLAudioElement
-		) {
-			return true;
-		}
-
-		if (current instanceof Element && current.shadowRoot) {
-			if (containsMediaNode(current.shadowRoot)) {
-				return true;
-			}
-		}
-
-		current = walker.nextNode();
+	if (node instanceof HTMLVideoElement || node instanceof HTMLAudioElement) {
+		return true;
 	}
 
-	return false;
+	return Boolean(node.querySelector("video, audio"));
+}
+
+function documentHasMedia(): boolean {
+	return Boolean(document.querySelector("video, audio"));
 }
 
 export default defineContentScript({
@@ -75,7 +57,9 @@ export default defineContentScript({
 		const loadDesiredSpeed = async (
 			nextSettings: AppSettings,
 		): Promise<number> => {
-			if (!nextSettings.enabled) return 1;
+			if (!nextSettings.enabled) {
+				return nextSettings.preferredSpeed;
+			}
 
 			const remembered = nextSettings.rememberLastSpeed
 				? await getRestorableSavedSpeed(nextSettings.saveScope, hostname)
@@ -106,16 +90,27 @@ export default defineContentScript({
 		};
 
 		const emitDormantState = () => {
-			if (!isTopFrame) return;
+			if (!isTopFrame) {
+				return;
+			}
 			emitState(createDormantState());
 		};
 
+		const stopBootstrapObserver = () => {
+			bootstrapObserver?.disconnect();
+			bootstrapObserver = null;
+		};
+
 		const ensureRegistry = (): MediaRegistry | null => {
+			if (!settings.enabled) {
+				return null;
+			}
+
 			if (registry) {
 				return registry;
 			}
 
-			if (!containsMediaNode(document.documentElement)) {
+			if (!documentHasMedia()) {
 				return null;
 			}
 
@@ -125,18 +120,16 @@ export default defineContentScript({
 				hostname,
 				onSpeedPersist: async (speed) => {
 					desiredSpeed = speed;
-					if (!settings.rememberLastSpeed) return;
+					if (!settings.rememberLastSpeed) {
+						return;
+					}
+
 					await setLastSavedSpeed(settings.saveScope, hostname, speed);
 				},
 				onStateChanged: emitState,
 			});
 			registry.start();
-
-			if (bootstrapObserver) {
-				bootstrapObserver.disconnect();
-				bootstrapObserver = null;
-			}
-
+			stopBootstrapObserver();
 			return registry;
 		};
 
@@ -147,8 +140,11 @@ export default defineContentScript({
 
 			bootstrapObserver = new MutationObserver((mutations) => {
 				for (const mutation of mutations) {
-					for (const node of Array.from(mutation.addedNodes)) {
-						if (!containsMediaNode(node)) continue;
+					for (const node of mutation.addedNodes) {
+						if (!nodeHasMedia(node)) {
+							continue;
+						}
+
 						ensureRegistry();
 						return;
 					}
@@ -166,19 +162,36 @@ export default defineContentScript({
 		): Promise<void> => {
 			settings = nextSettings;
 			desiredSpeed = await loadDesiredSpeed(settings);
+
+			if (!settings.enabled) {
+				registry?.stop();
+				registry = null;
+				stopBootstrapObserver();
+				emitDormantState();
+				return;
+			}
+
 			if (registry) {
 				registry.updateSettings();
-			} else {
-				emitDormantState();
-				startBootstrapObserver();
+				return;
 			}
+
+			if (ensureRegistry()) {
+				return;
+			}
+
+			emitDormantState();
+			startBootstrapObserver();
 		};
 
 		const showActionToast = (
 			action: "increase" | "decrease" | "reset" | "preferred",
 			speed: number,
 		) => {
-			if (!settings.toastEnabled) return;
+			if (!settings.toastEnabled) {
+				return;
+			}
+
 			toast.show(action === "reset" ? "Reset to 1x" : formatSpeed(speed));
 		};
 
@@ -186,7 +199,10 @@ export default defineContentScript({
 			action: "increase" | "decrease" | "reset" | "preferred",
 		) => {
 			const activeRegistry = ensureRegistry();
-			if (!activeRegistry) return;
+			if (!activeRegistry) {
+				return;
+			}
+
 			const nextSpeed = await activeRegistry.applyAction(action);
 			if (nextSpeed !== null) {
 				showActionToast(action, nextSpeed);
@@ -194,12 +210,19 @@ export default defineContentScript({
 		};
 
 		const handleKeydown = (event: KeyboardEvent) => {
-			if (!settings.enabled || isEditableTarget(event.target)) return;
+			if (!settings.enabled || isEditableTarget(event.target)) {
+				return;
+			}
+
 			const action = matchShortcutAction(event, settings.shortcuts);
-			if (!action) return;
+			if (!action) {
+				return;
+			}
 
 			const activeRegistry = ensureRegistry();
-			if (!activeRegistry || !activeRegistry.canControlMedia()) return;
+			if (!activeRegistry || !activeRegistry.canControlMedia()) {
+				return;
+			}
 
 			event.preventDefault();
 			void handleShortcutAction(action);
@@ -225,6 +248,7 @@ export default defineContentScript({
 				if (!activeRegistry) {
 					return null;
 				}
+
 				const action = (runtimeMessage as ApplyActionMessage).payload.action;
 				const nextSpeed = await activeRegistry.applyAction(action);
 				if (nextSpeed !== null) {
@@ -240,6 +264,7 @@ export default defineContentScript({
 				if (!activeRegistry) {
 					return null;
 				}
+
 				const nextSpeed = await activeRegistry.applyExactSpeed(
 					(runtimeMessage as ApplyExactSpeedMessage).payload.speed,
 				);
@@ -258,8 +283,10 @@ export default defineContentScript({
 			desiredSpeed = await loadDesiredSpeed(settings);
 
 			if (!ensureRegistry()) {
-				startBootstrapObserver();
 				emitDormantState();
+				if (settings.enabled) {
+					startBootstrapObserver();
+				}
 			}
 
 			window.addEventListener("keydown", handleKeydown, true);
@@ -275,7 +302,7 @@ export default defineContentScript({
 
 		return () => {
 			stopListeningToStorage();
-			bootstrapObserver?.disconnect();
+			stopBootstrapObserver();
 			registry?.stop();
 			window.removeEventListener("keydown", handleKeydown, true);
 			browser.runtime.onMessage.removeListener(handleRuntimeMessage);

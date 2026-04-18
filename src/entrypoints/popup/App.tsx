@@ -4,8 +4,6 @@ import { getSettings, updateSettings } from "@/core/settings";
 import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { normalizeRules } from "@/core/siteRules";
 import type {
-	ApplyActionMessage,
-	ApplyExactSpeedMessage,
 	ApplyTabActionMessage,
 	ApplyTabExactSpeedMessage,
 	GetTabStateMessage,
@@ -36,26 +34,6 @@ function capitalize(value: string | null | undefined): string {
 async function getActiveTab(): Promise<browser.Tabs.Tab | null> {
 	const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
 	return tab ?? null;
-}
-
-function getStateScore(state: PopupState | null | undefined): number {
-	if (!state) return -1;
-
-	let score = 0;
-	if (state.hasMedia) score += 100;
-	if (state.currentSpeed !== null) score += 10;
-	if (state.activeKind === "video") score += 5;
-	if (state.hostname) score += 1;
-	return score;
-}
-
-function pickBetterState(
-	current: PopupState | null,
-	candidate: PopupState | null,
-): PopupState | null {
-	return getStateScore(candidate) > getStateScore(current)
-		? candidate
-		: current;
 }
 
 function applyPopupState(
@@ -103,20 +81,6 @@ async function requestPopupStatus(
 		state,
 		unavailableReason: null,
 	};
-}
-
-function isMissingTabError(error: unknown): boolean {
-	const text = error instanceof Error ? error.message : String(error);
-	return text.includes("No tab with id");
-}
-
-async function safeTabExists(tabId: number): Promise<boolean> {
-	try {
-		const tab = await browser.tabs.get(tabId);
-		return typeof tab?.id === "number";
-	} catch {
-		return false;
-	}
 }
 
 function parseSpeedInput(input: string, fallback: number): number {

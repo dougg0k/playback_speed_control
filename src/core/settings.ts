@@ -32,7 +32,10 @@ function sanitizeSavedSpeedEntry(value: unknown): SavedSpeedEntry | null {
 	}
 
 	const candidate = value as Partial<SavedSpeedEntry>;
-	if (typeof candidate.value !== "number") {
+	if (
+		typeof candidate.value !== "number" ||
+		!Number.isFinite(candidate.value)
+	) {
 		return null;
 	}
 
@@ -43,7 +46,7 @@ function sanitizeSavedSpeedEntry(value: unknown): SavedSpeedEntry | null {
 			Number.isFinite(candidate.updatedAt)
 				? candidate.updatedAt
 				: Date.now(),
-		source: candidate.source === "explicit" ? "explicit" : undefined,
+		restorable: candidate.restorable === true ? true : undefined,
 	};
 }
 
@@ -79,17 +82,19 @@ export function sanitizeSettings(
 function sanitizePlaybackState(
 	value: Partial<PersistedPlaybackState> | undefined,
 ): PersistedPlaybackState {
-	const siteLastSpeedEntries = Object.entries(value?.siteLastSpeed ?? {})
-		.map(
-			([siteKey, entry]) => [siteKey, sanitizeSavedSpeedEntry(entry)] as const,
-		)
-		.filter(([siteKey, entry]) => Boolean(siteKey) && entry !== null) as Array<
-		[string, SavedSpeedEntry]
-	>;
+	const siteLastSpeed: Record<string, SavedSpeedEntry> = {};
+
+	for (const [siteKey, entry] of Object.entries(value?.siteLastSpeed ?? {})) {
+		const sanitizedEntry = sanitizeSavedSpeedEntry(entry);
+		if (!siteKey || !sanitizedEntry) {
+			continue;
+		}
+		siteLastSpeed[siteKey] = sanitizedEntry;
+	}
 
 	return {
 		globalLastSpeed: sanitizeSavedSpeedEntry(value?.globalLastSpeed),
-		siteLastSpeed: Object.fromEntries(siteLastSpeedEntries),
+		siteLastSpeed,
 	};
 }
 
@@ -126,14 +131,8 @@ async function getSavedSpeedEntry(
 	if (scope === "global") {
 		return state.globalLastSpeed;
 	}
-	return state.siteLastSpeed[siteKey] ?? null;
-}
 
-export async function getLastSavedSpeed(
-	scope: SaveScope,
-	siteKey: string,
-): Promise<number | null> {
-	return (await getSavedSpeedEntry(scope, siteKey))?.value ?? null;
+	return state.siteLastSpeed[siteKey] ?? null;
 }
 
 export async function getRestorableSavedSpeed(
@@ -141,9 +140,10 @@ export async function getRestorableSavedSpeed(
 	siteKey: string,
 ): Promise<number | null> {
 	const entry = await getSavedSpeedEntry(scope, siteKey);
-	if (!entry || entry.source !== "explicit") {
+	if (!entry || entry.restorable !== true) {
 		return null;
 	}
+
 	return entry.value;
 }
 
@@ -153,23 +153,35 @@ export async function setLastSavedSpeed(
 	speed: number,
 ): Promise<void> {
 	const current = await getPlaybackState();
-	const next = { ...current };
 	const nextEntry: SavedSpeedEntry = {
 		value: clampSpeed(speed),
 		updatedAt: Date.now(),
-		source: "explicit",
+		restorable: true,
 	};
 
 	if (scope === "global") {
-		next.globalLastSpeed = nextEntry;
-	} else if (siteKey) {
-		next.siteLastSpeed = {
-			...current.siteLastSpeed,
-			[siteKey]: nextEntry,
-		};
+		await browser.storage.local.set({
+			[STORAGE_KEYS.playbackState]: {
+				...current,
+				globalLastSpeed: nextEntry,
+			},
+		});
+		return;
 	}
 
-	await browser.storage.local.set({ [STORAGE_KEYS.playbackState]: next });
+	if (!siteKey) {
+		return;
+	}
+
+	await browser.storage.local.set({
+		[STORAGE_KEYS.playbackState]: {
+			...current,
+			siteLastSpeed: {
+				...current.siteLastSpeed,
+				[siteKey]: nextEntry,
+			},
+		},
+	});
 }
 
 export function listenForSettingsChanges(
@@ -179,7 +191,10 @@ export function listenForSettingsChanges(
 		changes: Record<string, browser.Storage.StorageChange>,
 		areaName: string,
 	) => {
-		if (areaName !== "local" || !(STORAGE_KEYS.settings in changes)) return;
+		if (areaName !== "local" || !(STORAGE_KEYS.settings in changes)) {
+			return;
+		}
+
 		callback(
 			sanitizeSettings(
 				changes[STORAGE_KEYS.settings].newValue as Partial<AppSettings>,
