@@ -507,7 +507,7 @@ export class MediaRegistry {
 
 	private restoreDesiredSpeed(element: HTMLMediaElement): void {
 		const settings = this.options.getSettings();
-		if (!settings.enabled || !settings.forceSavedSpeedOnLoad) {
+		if (!settings.enabled || !settings.autoRestoreSpeedOnNewMedia) {
 			return;
 		}
 

@@ -430,14 +430,14 @@ function App() {
 						<div className="section-heading">
 							<h3>Persistence</h3>
 							<span>
-								Control what speed is remembered and how it gets reused.
+								Control what speed is remembered for this host and how the
+								selected speed gets reused on new media.
 							</span>
 						</div>
-
 						<label className="toggle-row">
 							<div>
 								<strong>Remember last speed</strong>
-								<p>Store the last extension-applied speed.</p>
+								<p>Store the last selected speed for this host.</p>
 							</div>
 							<input
 								type="checkbox"
@@ -448,35 +448,20 @@ function App() {
 							/>
 						</label>
 
-						<label className="field">
-							<span>Save scope</span>
-							<select
-								value={settings.saveScope}
-								onChange={(event) =>
-									void saveSettings({
-										saveScope: event.target.value as AppSettings["saveScope"],
-									})
-								}
-							>
-								<option value="global">Global</option>
-								<option value="site">Per site</option>
-							</select>
-						</label>
-
 						<label className="toggle-row">
 							<div>
 								<strong>Auto-restore speed on new media</strong>
 								<p>
-									Reapply the saved or preferred speed when a new media element
-									loads.
+									Apply the current selected speed when a new media element
+									becomes active.
 								</p>
 							</div>
 							<input
 								type="checkbox"
-								checked={settings.forceSavedSpeedOnLoad}
+								checked={settings.autoRestoreSpeedOnNewMedia}
 								onChange={(event) =>
 									void saveSettings({
-										forceSavedSpeedOnLoad: event.target.checked,
+										autoRestoreSpeedOnNewMedia: event.target.checked,
 									})
 								}
 							/>
@@ -488,7 +473,6 @@ function App() {
 							<h3>Behavior</h3>
 							<span>Keep the control surface focused and lightweight.</span>
 						</div>
-
 						<label className="toggle-row">
 							<div>
 								<strong>Work on audio too</strong>
@@ -502,7 +486,6 @@ function App() {
 								}
 							/>
 						</label>
-
 						<label className="toggle-row">
 							<div>
 								<strong>Show toast</strong>

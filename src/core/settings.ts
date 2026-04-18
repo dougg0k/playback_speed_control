@@ -3,7 +3,6 @@ import {
 	DEFAULT_SETTINGS,
 	type AppSettings,
 	type PersistedPlaybackState,
-	type SaveScope,
 	type SavedSpeedEntry,
 	type ShortcutConfig,
 } from "@/types/settings";
@@ -20,10 +19,6 @@ function sanitizeShortcuts(
 		reset: value?.reset?.trim() || DEFAULT_SETTINGS.shortcuts.reset,
 		preferred: value?.preferred?.trim() || DEFAULT_SETTINGS.shortcuts.preferred,
 	};
-}
-
-function sanitizeSaveScope(value: unknown): SaveScope {
-	return value === "global" ? "global" : "site";
 }
 
 function sanitizeSavedSpeedEntry(value: unknown): SavedSpeedEntry | null {
@@ -67,9 +62,11 @@ export function sanitizeSettings(
 		),
 		rememberLastSpeed:
 			value?.rememberLastSpeed ?? DEFAULT_SETTINGS.rememberLastSpeed,
-		saveScope: sanitizeSaveScope(value?.saveScope),
-		forceSavedSpeedOnLoad:
-			value?.forceSavedSpeedOnLoad ?? DEFAULT_SETTINGS.forceSavedSpeedOnLoad,
+		autoRestoreSpeedOnNewMedia:
+			value?.autoRestoreSpeedOnNewMedia ??
+			(value as { forceSavedSpeedOnLoad?: boolean } | undefined)
+				?.forceSavedSpeedOnLoad ??
+			DEFAULT_SETTINGS.autoRestoreSpeedOnNewMedia,
 		workOnAudio: value?.workOnAudio ?? DEFAULT_SETTINGS.workOnAudio,
 		toastEnabled: value?.toastEnabled ?? DEFAULT_SETTINGS.toastEnabled,
 		disabledSites: normalizeRules(
@@ -82,19 +79,24 @@ export function sanitizeSettings(
 function sanitizePlaybackState(
 	value: Partial<PersistedPlaybackState> | undefined,
 ): PersistedPlaybackState {
-	const siteLastSpeed: Record<string, SavedSpeedEntry> = {};
+	const hostLastSpeed: Record<string, SavedSpeedEntry> = {};
+	const legacySiteLastSpeed = (
+		value as { siteLastSpeed?: Record<string, unknown> } | undefined
+	)?.siteLastSpeed;
+	const sourceEntries = Object.entries(
+		value?.hostLastSpeed ?? legacySiteLastSpeed ?? {},
+	);
 
-	for (const [siteKey, entry] of Object.entries(value?.siteLastSpeed ?? {})) {
+	for (const [hostKey, entry] of sourceEntries) {
 		const sanitizedEntry = sanitizeSavedSpeedEntry(entry);
-		if (!siteKey || !sanitizedEntry) {
+		if (!hostKey || !sanitizedEntry) {
 			continue;
 		}
-		siteLastSpeed[siteKey] = sanitizedEntry;
+		hostLastSpeed[hostKey] = sanitizedEntry;
 	}
 
 	return {
-		globalLastSpeed: sanitizeSavedSpeedEntry(value?.globalLastSpeed),
-		siteLastSpeed,
+		hostLastSpeed,
 	};
 }
 
@@ -124,22 +126,20 @@ export async function getPlaybackState(): Promise<PersistedPlaybackState> {
 }
 
 async function getSavedSpeedEntry(
-	scope: SaveScope,
-	siteKey: string,
+	hostKey: string,
 ): Promise<SavedSpeedEntry | null> {
-	const state = await getPlaybackState();
-	if (scope === "global") {
-		return state.globalLastSpeed;
+	if (!hostKey) {
+		return null;
 	}
 
-	return state.siteLastSpeed[siteKey] ?? null;
+	const state = await getPlaybackState();
+	return state.hostLastSpeed[hostKey] ?? null;
 }
 
-export async function getRestorableSavedSpeed(
-	scope: SaveScope,
-	siteKey: string,
+export async function getRememberedSpeed(
+	hostKey: string,
 ): Promise<number | null> {
-	const entry = await getSavedSpeedEntry(scope, siteKey);
+	const entry = await getSavedSpeedEntry(hostKey);
 	if (!entry || entry.restorable !== true) {
 		return null;
 	}
@@ -147,11 +147,14 @@ export async function getRestorableSavedSpeed(
 	return entry.value;
 }
 
-export async function setLastSavedSpeed(
-	scope: SaveScope,
-	siteKey: string,
+export async function setRememberedSpeed(
+	hostKey: string,
 	speed: number,
 ): Promise<void> {
+	if (!hostKey) {
+		return;
+	}
+
 	const current = await getPlaybackState();
 	const nextEntry: SavedSpeedEntry = {
 		value: clampSpeed(speed),
@@ -159,26 +162,12 @@ export async function setLastSavedSpeed(
 		restorable: true,
 	};
 
-	if (scope === "global") {
-		await browser.storage.local.set({
-			[STORAGE_KEYS.playbackState]: {
-				...current,
-				globalLastSpeed: nextEntry,
-			},
-		});
-		return;
-	}
-
-	if (!siteKey) {
-		return;
-	}
-
 	await browser.storage.local.set({
 		[STORAGE_KEYS.playbackState]: {
 			...current,
-			siteLastSpeed: {
-				...current.siteLastSpeed,
-				[siteKey]: nextEntry,
+			hostLastSpeed: {
+				...current.hostLastSpeed,
+				[hostKey]: nextEntry,
 			},
 		},
 	});

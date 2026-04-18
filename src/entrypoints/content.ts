@@ -1,9 +1,9 @@
 import { MESSAGE_TYPES } from "@/constants/extension";
 import {
-	getRestorableSavedSpeed,
+	getRememberedSpeed,
 	getSettings,
 	listenForSettingsChanges,
-	setLastSavedSpeed,
+	setRememberedSpeed,
 } from "@/core/settings";
 import { MediaRegistry } from "@/core/mediaRegistry";
 import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
@@ -62,7 +62,7 @@ export default defineContentScript({
 			}
 
 			const remembered = nextSettings.rememberLastSpeed
-				? await getRestorableSavedSpeed(nextSettings.saveScope, hostname)
+				? await getRememberedSpeed(hostname)
 				: null;
 
 			return remembered ?? nextSettings.preferredSpeed;
@@ -124,7 +124,7 @@ export default defineContentScript({
 						return;
 					}
 
-					await setLastSavedSpeed(settings.saveScope, hostname, speed);
+					await setRememberedSpeed(hostname, speed);
 				},
 				onStateChanged: emitState,
 			});

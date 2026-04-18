@@ -65,14 +65,14 @@ Support is **best effort** for:
 - reset speed to `1x`
 - preferred/default speed
 - remember last used speed
-- optional force/apply saved speed on load
+- auto-restore speed on new media
 - keyboard shortcuts
 - disable extension on specific sites
 - optional audio support
 - popup UI as the main interface
 - toolbar badge showing current speed for active tab
 - optional transient toast for feedback when speed changes
-- optional per-site saved speed behavior
+- host-scoped remembered speed behavior
 
 ### Out of scope for v1
 
@@ -84,7 +84,7 @@ Support is **best effort** for:
 - subtitle controls or subtitle synchronization logic
 - progress restore / resume playback position
 - permanent floating controller overlay as default UI
-- cross-tab/global-context inheritance models
+- cross-tab inherited playback state models
 - broad site-specific hacks as default behavior
 
 ---
@@ -111,7 +111,7 @@ Should expose only the high-frequency controls:
 - speed down
 - reset to `1x`
 - preferred speed quick control
-- current site enabled/disabled state
+- current host enabled/disabled state
 - optional audio toggle shortcut/access if needed
 
 ### Expanded/settings popup view
@@ -121,8 +121,7 @@ Should expose:
 - keyboard shortcut mapping/config
 - preferred/default speed
 - remember last speed toggle
-- per-site save behavior toggle
-- force/apply saved speed on load toggle
+- auto-restore speed on new media toggle
 - audio support toggle
 - disabled sites list
 - optional toast toggle
@@ -222,26 +221,35 @@ Selected behavior:
 - startup/internal player `ratechange` events must not overwrite remembered speed
 - player speed changes that happen right after a real user interaction with that player become the new current extension speed
 
-### Save scope
+### Remembered speed scope
 
-The user should be able to choose whether saved speed behavior is:
+Remembered speed should be stored by **hostname** only.
 
-- **global**
-- **per-site**
+That means:
 
-If per-site mode is enabled, saved speed should be stored and applied based on the current site.
+- one remembered speed per host
+- not per full URL
+- not a hidden global mode
+- not automatic sharing across different subdomains
 
-### Force/apply saved speed on load
+### Auto-restore speed on new media
 
-Optional setting to actively re-apply the remembered/preferred speed on media load, for sites that override playback speed.
+Optional setting to apply the current selected speed when a new media element becomes active.
 
 Important distinction:
 
-- **remember last speed** = save the last extension-owned value
-- **save scope** = global or per-site
-- **force/apply on load** = actively re-apply speed when new media is initialized or a site resets it
+- **preferred speed** = the fallback selected speed when there is no remembered speed for the current host
+- **remember last speed** = persist the current selected speed for the current host after a real speed change
+- **auto-restore speed on new media** = apply the already selected speed to a newly active media element
 
 Implementation rules:
+
+- remember-last-speed is the persistence path only
+- auto-restore-on-new-media is the restore/apply path only
+- the selected speed is initialized from remembered host speed when available; otherwise it falls back to preferred speed
+- auto-restore on new media applies the current selected speed for the session; it must not decide what the remembered speed becomes
+
+Runtime rules:
 
 - pages without eligible media must remain dormant
 - non-media pages must not intercept extension shortcuts
@@ -441,7 +449,7 @@ Responsibilities:
 - expanded settings view
 - read/update settings
 - show current tab speed/status
-- allow per-site enable/disable action
+- allow per-host enable/disable action
 
 ### D. Shared domain modules
 
@@ -501,8 +509,7 @@ The exact WXT entrypoint layout can be adjusted to the generated template, but t
 - preferred/default speed
 - speed increment step
 - remember last used speed
-- save scope: global or per-site
-- apply/force saved speed on load
+- auto-restore speed on new media
 - work on audio
 - disabled sites list
 - toast enabled
@@ -518,8 +525,7 @@ interface AppSettings {
   preferredSpeed: number;
   speedStep: number;
   rememberLastSpeed: boolean;
-  saveScope: 'global' | 'site';
-  forceSavedSpeedOnLoad: boolean;
+  autoRestoreSpeedOnNewMedia: boolean;
   workOnAudio: boolean;
   toastEnabled: boolean;
   disabledSites: string[];
@@ -529,15 +535,11 @@ interface AppSettings {
 interface SavedSpeedEntry {
   value: number;
   updatedAt: number;
+  restorable?: true;
 }
 
-interface GlobalPlaybackState {
-  lastSpeed?: SavedSpeedEntry;
-}
-
-interface SitePlaybackState {
-  siteKey: string;
-  lastSpeed?: SavedSpeedEntry;
+interface PersistedPlaybackState {
+  hostLastSpeed: Record<string, SavedSpeedEntry>;
 }
 ```
 
@@ -621,8 +623,7 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 - preferred speed input
 - step size input
 - remember last speed toggle
-- save scope selector: global or per-site
-- force saved speed on load toggle
+- auto-restore speed on new media toggle
 - audio support toggle
 - toast toggle
 - disabled sites editor
@@ -649,8 +650,7 @@ The implementation should intentionally avoid the known failure categories seen 
 - overly broad feature surface
 - cross-tab state leakage
 - site-specific hacks as baseline architecture
-- hidden global modes that users cannot reason about
-- excessive content-script work on pages with no media
+- - excessive content-script work on pages with no media
 - inconsistent saved-speed behavior
 - shortcut behavior that silently targets the wrong element
 
@@ -667,8 +667,8 @@ A smaller correct feature set is better than a broader unstable one.
 The extension is acceptable for v1 if it can reliably do the following:
 
 - change speed on standard HTML5 video players
-- remember and reapply saved speed when configured
-- support global or per-site saved speed behavior
+- remember speed by host and reapply the current selected speed on new media when configured
+- support host-scoped remembered speed behavior
 - avoid affecting disabled sites
 - update badge correctly for the active tab
 - allow all essential controls from the popup
@@ -737,7 +737,7 @@ These can be finalized once the bootstrap zip is uploaded and the repo structure
 
 If implementation starts now, **v1** should be defined as:
 
-> A Firefox-first extension built with WXT + TypeScript + React that provides reliable playback speed control for standard web media through a compact popup, keyboard shortcuts, a badge showing current speed when media is active, optional global or per-site saved-speed behavior, disabled-site rules, optional audio support, and optional transient toast feedback.
+> A Firefox-first extension built with WXT + TypeScript + React that provides reliable playback speed control for standard web media through a compact popup, keyboard shortcuts, a badge showing current speed when media is active, host-scoped remembered speed, auto-restore on new media, disabled-site rules, optional audio support, and optional transient toast feedback.
 
 Anything beyond that should be treated as a deliberate later expansion, not automatic v1 scope.
 

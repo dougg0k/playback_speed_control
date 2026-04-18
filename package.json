@@ -2,7 +2,7 @@
 	"name": "playback_speed_control",
 	"description": "A playback speed controller for Video / Audio players",
 	"private": true,
-	"version": "1.0.27",
+	"version": "1.0.28",
 	"type": "module",
 	"scripts": {
 		"dev": "wxt",

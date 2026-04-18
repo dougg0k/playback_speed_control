@@ -1,4 +1,3 @@
-export type SaveScope = "global" | "site";
 export type ShortcutAction = "increase" | "decrease" | "reset" | "preferred";
 
 export interface ShortcutConfig {
@@ -13,8 +12,7 @@ export interface AppSettings {
 	preferredSpeed: number;
 	speedStep: number;
 	rememberLastSpeed: boolean;
-	saveScope: SaveScope;
-	forceSavedSpeedOnLoad: boolean;
+	autoRestoreSpeedOnNewMedia: boolean;
 	workOnAudio: boolean;
 	toastEnabled: boolean;
 	disabledSites: string[];
@@ -28,8 +26,7 @@ export interface SavedSpeedEntry {
 }
 
 export interface PersistedPlaybackState {
-	globalLastSpeed: SavedSpeedEntry | null;
-	siteLastSpeed: Record<string, SavedSpeedEntry>;
+	hostLastSpeed: Record<string, SavedSpeedEntry>;
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutConfig = {
@@ -44,8 +41,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	preferredSpeed: 1,
 	speedStep: 0.1,
 	rememberLastSpeed: true,
-	saveScope: "site",
-	forceSavedSpeedOnLoad: true,
+	autoRestoreSpeedOnNewMedia: true,
 	workOnAudio: false,
 	toastEnabled: true,
 	disabledSites: [],
@@ -53,6 +49,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const DEFAULT_PLAYBACK_STATE: PersistedPlaybackState = {
-	globalLastSpeed: null,
-	siteLastSpeed: {},
+	hostLastSpeed: {},
 };
