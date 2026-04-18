@@ -208,7 +208,19 @@ A user-defined preferred speed that acts as the default chosen speed.
 
 ### Remember last used speed
 
-Store the last applied speed for reuse when enabled.
+Store the last extension-owned speed for reuse when enabled.
+
+### Effective speed authority
+
+The runtime authority rules must be seamless and fixed in product behavior, not exposed as a user-facing mode switch.
+
+Selected behavior:
+
+- the current extension speed is the authoritative speed used by the extension
+- if the user changes speed through the player UI or player shortcuts, that observed speed becomes the new current extension speed
+- startup/internal player `ratechange` events must not be treated as user intent
+- startup/internal player `ratechange` events must not overwrite remembered speed
+- legacy remembered-speed data without current provenance metadata must not be auto-restored as authoritative speed
 
 ### Save scope
 
@@ -225,9 +237,18 @@ Optional setting to actively re-apply the remembered/preferred speed on media lo
 
 Important distinction:
 
-- **remember last speed** = save the last used value
+- **remember last speed** = save the last extension-owned value
 - **save scope** = global or per-site
 - **force/apply on load** = actively re-apply speed when new media is initialized or a site resets it
+
+Implementation rules:
+
+- pages without eligible media must remain dormant
+- non-media pages must not intercept extension shortcuts
+- restoring speed during media initialization must not poison remembered speed with fallback or transient player values such as the clamp floor
+- extension runtime must avoid repeated whole-document rescans in normal steady-state control paths
+- subframes without eligible media must not emit dormant state, win frame selection, or become action targets
+- startup speed restore must wait for a playback-ready lifecycle point rather than forcing speed during very early media initialization
 
 ## 5.3 Audio support
 
@@ -477,6 +498,8 @@ The exact WXT entrypoint layout can be adjusted to the generated template, but t
 - toast enabled
 - shortcut mappings
 
+Do not add a user-facing speed-authority mode toggle. The authority behavior is part of the fixed runtime design.
+
 ### Suggested stored shapes
 
 ```ts
@@ -493,19 +516,26 @@ interface AppSettings {
   shortcuts: ShortcutConfig[];
 }
 
+interface SavedSpeedEntry {
+  value: number;
+  updatedAt: number;
+}
+
 interface GlobalPlaybackState {
-  lastSpeed?: number;
+  lastSpeed?: SavedSpeedEntry;
 }
 
 interface SitePlaybackState {
   siteKey: string;
-  lastSpeed?: number;
+  lastSpeed?: SavedSpeedEntry;
 }
 ```
 
 ### State model rule
 
 Keep storage intentionally simple. Do not introduce complex inheritance/state layers in v1.
+
+Store remembered speed with enough metadata to distinguish current trusted entries from legacy ambiguous entries.
 
 ---
 
@@ -634,6 +664,8 @@ The extension is acceptable for v1 if it can reliably do the following:
 - provide working keyboard shortcuts
 - handle dynamically inserted media on common sites
 - avoid noticeable performance degradation on normal browsing pages
+- avoid changing or intercepting pages that do not contain eligible media
+- do not reset startup playback to the clamp floor unless the user explicitly chose that speed
 
 ## 16.2 Manual test matrix
 

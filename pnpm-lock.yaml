@@ -23,16 +23,16 @@ importers:
         version: 19.2.3(@types/react@19.2.14)
       '@wxt-dev/auto-icons':
         specifier: ^1.1.1
-        version: 1.1.1(wxt@0.20.22(@types/node@25.6.0)(jiti@2.6.1))
+        version: 1.1.1(wxt@0.20.25(@types/node@25.6.0)(jiti@2.6.1))
       '@wxt-dev/module-react':
         specifier: 1.2.2
-        version: 1.2.2(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1))(wxt@0.20.22(@types/node@25.6.0)(jiti@2.6.1))
+        version: 1.2.2(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1))(wxt@0.20.25(@types/node@25.6.0)(jiti@2.6.1))
       typescript:
-        specifier: 6.0.2
-        version: 6.0.2
+        specifier: 6.0.3
+        version: 6.0.3
       wxt:
-        specifier: 0.20.22
-        version: 0.20.22(@types/node@25.6.0)(jiti@2.6.1)
+        specifier: 0.20.25
+        version: 0.20.25(@types/node@25.6.0)(jiti@2.6.1)
 
 packages:
 
@@ -1713,8 +1713,8 @@ packages:
   typedarray@0.0.6:
     resolution: {integrity: sha512-/aCDEGatGvZ2BIk+HmLf4ifCJFwvKFNb9/JeZPMulfgFracn9QFcAf5GO8B/mweUjSoblS5In0cWhqpfs/5PQA==}
 
-  typescript@6.0.2:
-    resolution: {integrity: sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -1851,8 +1851,8 @@ packages:
     resolution: {integrity: sha512-g/eziiSUNBSsdDJtCLB8bdYEUMj4jR7AGeUo96p/3dTafgjHhpF4RiCFPiRILwjQoDXx5MqkBr4fwWtR3Ky4Wg==}
     engines: {node: '>=20'}
 
-  wxt@0.20.22:
-    resolution: {integrity: sha512-njFI77H0dAbK/bQCN8u8QYiusg6GKDPMtsQDCqIfrh1oGHMHgrMEMgeGOlqAltG9OOGGB1DvFYDzTvxqfEKVKQ==}
+  wxt@0.20.25:
+    resolution: {integrity: sha512-ca+8Yt0Auzn9tX0ZW2Kzocb9yM8F/RoOjcYQ0fHkwcSc7/IUkqV2+1JUNn1SMSNAS4Gr3YQHAn/pi3q+jIGRqw==}
     engines: {bun: '>=1.2.0', node: '>=20.12.0'}
     hasBin: true
     peerDependencies:
@@ -2269,23 +2269,23 @@ snapshots:
 
   '@webext-core/match-patterns@1.0.3': {}
 
-  '@wxt-dev/auto-icons@1.1.1(wxt@0.20.22(@types/node@25.6.0)(jiti@2.6.1))':
+  '@wxt-dev/auto-icons@1.1.1(wxt@0.20.25(@types/node@25.6.0)(jiti@2.6.1))':
     dependencies:
       defu: 6.1.7
       fs-extra: 11.3.4
       sharp: 0.34.5
-      wxt: 0.20.22(@types/node@25.6.0)(jiti@2.6.1)
+      wxt: 0.20.25(@types/node@25.6.0)(jiti@2.6.1)
 
   '@wxt-dev/browser@0.1.40':
     dependencies:
       '@types/filesystem': 0.0.36
       '@types/har-format': 1.2.16
 
-  '@wxt-dev/module-react@1.2.2(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1))(wxt@0.20.22(@types/node@25.6.0)(jiti@2.6.1))':
+  '@wxt-dev/module-react@1.2.2(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1))(wxt@0.20.25(@types/node@25.6.0)(jiti@2.6.1))':
     dependencies:
       '@vitejs/plugin-react': 6.0.1(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1))
       vite: 8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1)
-      wxt: 0.20.22(@types/node@25.6.0)(jiti@2.6.1)
+      wxt: 0.20.25(@types/node@25.6.0)(jiti@2.6.1)
     transitivePeerDependencies:
       - '@rolldown/plugin-babel'
       - babel-plugin-react-compiler
@@ -3357,7 +3357,7 @@ snapshots:
 
   typedarray@0.0.6: {}
 
-  typescript@6.0.2: {}
+  typescript@6.0.3: {}
 
   ufo@1.6.3: {}
 
@@ -3520,7 +3520,7 @@ snapshots:
       is-wsl: 3.1.1
       powershell-utils: 0.1.0
 
-  wxt@0.20.22(@types/node@25.6.0)(jiti@2.6.1):
+  wxt@0.20.25(@types/node@25.6.0)(jiti@2.6.1):
     dependencies:
       '@1natsu/wait-element': 4.2.0
       '@aklinker1/rollup-plugin-visualizer': 5.12.0

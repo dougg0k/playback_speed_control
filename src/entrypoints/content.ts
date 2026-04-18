@@ -1,18 +1,19 @@
 import { MESSAGE_TYPES } from "@/constants/extension";
 import {
+	getRestorableSavedSpeed,
 	getSettings,
-	getLastSavedSpeed,
 	listenForSettingsChanges,
 	setLastSavedSpeed,
 } from "@/core/settings";
-import { isHostnameDisabled } from "@/core/siteRules";
-import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
-import { ToastController } from "@/core/toast";
 import { MediaRegistry } from "@/core/mediaRegistry";
+import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
+import { isHostnameDisabled } from "@/core/siteRules";
+import { ToastController } from "@/core/toast";
 import type {
 	ApplyActionMessage,
 	ApplyExactSpeedMessage,
 	GetStateMessage,
+	PopupState,
 	RuntimeMessage,
 } from "@/types/messages";
 import { DEFAULT_SETTINGS, type AppSettings } from "@/types/settings";
@@ -21,12 +22,47 @@ import { getCurrentHostname } from "@/utils/urls";
 import { browser } from "wxt/browser";
 import { defineContentScript } from "wxt/utils/define-content-script";
 
+function containsMediaNode(root: Node | null): boolean {
+	if (!root) return false;
+	if (root instanceof HTMLVideoElement || root instanceof HTMLAudioElement) {
+		return true;
+	}
+
+	if (!(root instanceof Element || root instanceof ShadowRoot)) {
+		return false;
+	}
+
+	const ownerDocument = root.ownerDocument ?? document;
+	const walker = ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+	let current: Node | null = walker.currentNode;
+
+	while (current) {
+		if (
+			current instanceof HTMLVideoElement ||
+			current instanceof HTMLAudioElement
+		) {
+			return true;
+		}
+
+		if (current instanceof Element && current.shadowRoot) {
+			if (containsMediaNode(current.shadowRoot)) {
+				return true;
+			}
+		}
+
+		current = walker.nextNode();
+	}
+
+	return false;
+}
+
 export default defineContentScript({
 	matches: ["<all_urls>"],
 	allFrames: true,
 	runAt: "document_end",
 	main() {
 		const hostname = getCurrentHostname();
+		const isTopFrame = window.top === window.self;
 		const toast = new ToastController();
 
 		const resolveSettings = (nextSettings: AppSettings): AppSettings => ({
@@ -36,42 +72,106 @@ export default defineContentScript({
 				!isHostnameDisabled(hostname, nextSettings.disabledSites),
 		});
 
-		let settings: AppSettings = resolveSettings(DEFAULT_SETTINGS);
-		let desiredSpeed = settings.preferredSpeed;
+		const loadDesiredSpeed = async (
+			nextSettings: AppSettings,
+		): Promise<number> => {
+			if (!nextSettings.enabled) return 1;
 
-		const registry = new MediaRegistry({
-			getSettings: () => settings,
-			getDesiredSpeed: () => desiredSpeed,
+			const remembered = nextSettings.rememberLastSpeed
+				? await getRestorableSavedSpeed(nextSettings.saveScope, hostname)
+				: null;
+
+			return remembered ?? nextSettings.preferredSpeed;
+		};
+
+		const createDormantState = (): PopupState => ({
+			hasMedia: false,
+			activeKind: null,
+			currentSpeed: null,
+			siteDisabled: !settings.enabled,
 			hostname,
-			onSpeedPersist: async (speed) => {
-				desiredSpeed = speed;
-				if (!settings.rememberLastSpeed) return;
-				await setLastSavedSpeed(settings.saveScope, hostname, speed);
-			},
-			onStateChanged: (state) => {
-				void browser.runtime.sendMessage({
-					type: MESSAGE_TYPES.stateSnapshot,
-					payload: state,
-				} satisfies RuntimeMessage);
-			},
+			mediaCount: 0,
 		});
 
-		const refreshDesiredSpeed = async () => {
-			if (!settings.enabled) {
-				desiredSpeed = 1;
-				registry.updateSettings();
+		let settings: AppSettings = resolveSettings(DEFAULT_SETTINGS);
+		let desiredSpeed = settings.preferredSpeed;
+		let registry: MediaRegistry | null = null;
+		let bootstrapObserver: MutationObserver | null = null;
+
+		const emitState = (state: PopupState) => {
+			void browser.runtime.sendMessage({
+				type: MESSAGE_TYPES.stateSnapshot,
+				payload: state,
+			} satisfies RuntimeMessage);
+		};
+
+		const emitDormantState = () => {
+			if (!isTopFrame) return;
+			emitState(createDormantState());
+		};
+
+		const ensureRegistry = (): MediaRegistry | null => {
+			if (registry) {
+				return registry;
+			}
+
+			if (!containsMediaNode(document.documentElement)) {
+				return null;
+			}
+
+			registry = new MediaRegistry({
+				getSettings: () => settings,
+				getDesiredSpeed: () => desiredSpeed,
+				hostname,
+				onSpeedPersist: async (speed) => {
+					desiredSpeed = speed;
+					if (!settings.rememberLastSpeed) return;
+					await setLastSavedSpeed(settings.saveScope, hostname, speed);
+				},
+				onStateChanged: emitState,
+			});
+			registry.start();
+
+			if (bootstrapObserver) {
+				bootstrapObserver.disconnect();
+				bootstrapObserver = null;
+			}
+
+			return registry;
+		};
+
+		const startBootstrapObserver = () => {
+			if (bootstrapObserver || registry || !document.documentElement) {
 				return;
 			}
 
-			const remembered = settings.rememberLastSpeed
-				? await getLastSavedSpeed(settings.saveScope, hostname)
-				: null;
-			desiredSpeed = remembered ?? settings.preferredSpeed;
-			registry.updateSettings();
+			bootstrapObserver = new MutationObserver((mutations) => {
+				for (const mutation of mutations) {
+					for (const node of Array.from(mutation.addedNodes)) {
+						if (!containsMediaNode(node)) continue;
+						ensureRegistry();
+						return;
+					}
+				}
+			});
+
+			bootstrapObserver.observe(document.documentElement, {
+				childList: true,
+				subtree: true,
+			});
 		};
 
-		const emitCurrentState = () => {
-			registry.updateSettings();
+		const refreshDesiredSpeed = async (
+			nextSettings: AppSettings,
+		): Promise<void> => {
+			settings = nextSettings;
+			desiredSpeed = await loadDesiredSpeed(settings);
+			if (registry) {
+				registry.updateSettings();
+			} else {
+				emitDormantState();
+				startBootstrapObserver();
+			}
 		};
 
 		const showActionToast = (
@@ -85,7 +185,9 @@ export default defineContentScript({
 		const handleShortcutAction = async (
 			action: "increase" | "decrease" | "reset" | "preferred",
 		) => {
-			const nextSpeed = await registry.applyAction(action);
+			const activeRegistry = ensureRegistry();
+			if (!activeRegistry) return;
+			const nextSpeed = await activeRegistry.applyAction(action);
 			if (nextSpeed !== null) {
 				showActionToast(action, nextSpeed);
 			}
@@ -95,42 +197,56 @@ export default defineContentScript({
 			if (!settings.enabled || isEditableTarget(event.target)) return;
 			const action = matchShortcutAction(event, settings.shortcuts);
 			if (!action) return;
+
+			const activeRegistry = ensureRegistry();
+			if (!activeRegistry || !activeRegistry.canControlMedia()) return;
+
 			event.preventDefault();
 			void handleShortcutAction(action);
 		};
 
 		const handleRuntimeMessage = async (message: unknown) => {
 			const runtimeMessage = message as RuntimeMessage;
+			const activeRegistry = ensureRegistry();
 
 			if (
 				(runtimeMessage as GetStateMessage)?.type === MESSAGE_TYPES.getState
 			) {
-				return registry.getState();
+				return (
+					activeRegistry?.getState() ??
+					(isTopFrame ? createDormantState() : null)
+				);
 			}
 
 			if (
 				(runtimeMessage as ApplyActionMessage)?.type ===
 				MESSAGE_TYPES.applyAction
 			) {
+				if (!activeRegistry) {
+					return null;
+				}
 				const action = (runtimeMessage as ApplyActionMessage).payload.action;
-				const nextSpeed = await registry.applyAction(action);
+				const nextSpeed = await activeRegistry.applyAction(action);
 				if (nextSpeed !== null) {
 					showActionToast(action, nextSpeed);
 				}
-				return registry.getState();
+				return activeRegistry.getState();
 			}
 
 			if (
 				(runtimeMessage as ApplyExactSpeedMessage)?.type ===
 				MESSAGE_TYPES.applyExactSpeed
 			) {
-				const nextSpeed = await registry.applyExactSpeed(
+				if (!activeRegistry) {
+					return null;
+				}
+				const nextSpeed = await activeRegistry.applyExactSpeed(
 					(runtimeMessage as ApplyExactSpeedMessage).payload.speed,
 				);
 				if (nextSpeed !== null && settings.toastEnabled) {
 					toast.show(formatSpeed(nextSpeed));
 				}
-				return registry.getState();
+				return activeRegistry.getState();
 			}
 
 			return undefined;
@@ -138,23 +254,20 @@ export default defineContentScript({
 
 		const initialize = async () => {
 			browser.runtime.onMessage.addListener(handleRuntimeMessage);
-			registry.start();
-
 			settings = resolveSettings(await getSettings());
-			await refreshDesiredSpeed();
+			desiredSpeed = await loadDesiredSpeed(settings);
+
+			if (!ensureRegistry()) {
+				startBootstrapObserver();
+				emitDormantState();
+			}
 
 			window.addEventListener("keydown", handleKeydown, true);
-			window.addEventListener("load", emitCurrentState, true);
-			window.addEventListener("pageshow", emitCurrentState, true);
-			window.addEventListener("focus", emitCurrentState, true);
-			document.addEventListener("visibilitychange", emitCurrentState, true);
-			emitCurrentState();
 		};
 
 		const stopListeningToStorage = listenForSettingsChanges(
 			async (nextSettings) => {
-				settings = resolveSettings(nextSettings);
-				await refreshDesiredSpeed();
+				await refreshDesiredSpeed(resolveSettings(nextSettings));
 			},
 		);
 
@@ -162,12 +275,9 @@ export default defineContentScript({
 
 		return () => {
 			stopListeningToStorage();
-			registry.stop();
+			bootstrapObserver?.disconnect();
+			registry?.stop();
 			window.removeEventListener("keydown", handleKeydown, true);
-			window.removeEventListener("load", emitCurrentState, true);
-			window.removeEventListener("pageshow", emitCurrentState, true);
-			window.removeEventListener("focus", emitCurrentState, true);
-			document.removeEventListener("visibilitychange", emitCurrentState, true);
 			browser.runtime.onMessage.removeListener(handleRuntimeMessage);
 		};
 	},

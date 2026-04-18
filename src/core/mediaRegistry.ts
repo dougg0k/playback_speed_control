@@ -1,5 +1,5 @@
-import type { AppSettings, ShortcutAction } from "@/types/settings";
 import type { PopupState } from "@/types/messages";
+import type { AppSettings, ShortcutAction } from "@/types/settings";
 import { clampSpeed, roundSpeed } from "@/utils/numbers";
 
 export interface MediaRegistryOptions {
@@ -12,12 +12,14 @@ export interface MediaRegistryOptions {
 
 interface ListenerBundle {
 	onMediaInteraction: () => void;
-	onPlay: () => void;
 	onLoadedMetadata: () => void;
+	onCanPlay: () => void;
+	onPlaying: () => void;
 	onRateChange: () => void;
 }
 
-function isVisible(element: HTMLElement): boolean {
+function isVisibleVideo(element: HTMLMediaElement): boolean {
+	if (!(element instanceof HTMLVideoElement)) return true;
 	const rect = element.getBoundingClientRect();
 	const style = window.getComputedStyle(element);
 	return (
@@ -28,7 +30,8 @@ function isVisible(element: HTMLElement): boolean {
 	);
 }
 
-function getElementArea(element: HTMLElement): number {
+function getMediaArea(element: HTMLMediaElement): number {
+	if (!(element instanceof HTMLVideoElement)) return 0;
 	const rect = element.getBoundingClientRect();
 	return rect.width * rect.height;
 }
@@ -37,16 +40,29 @@ function isPlayableMedia(element: HTMLMediaElement): boolean {
 	return !(element instanceof HTMLVideoElement) || element.readyState >= 0;
 }
 
+function isApproximatelyEqual(
+	left: number,
+	right: number,
+	epsilon: number,
+): boolean {
+	return Math.abs(left - right) <= epsilon;
+}
+
 export class MediaRegistry {
-	private static readonly USER_INTERACTION_WINDOW_MS = 1500;
+	private static readonly USER_INTERACTION_WINDOW_MS = 1200;
+	private static readonly TARGET_INTERACTION_WINDOW_MS = 5000;
 	private static readonly LIFECYCLE_RESTORE_WINDOW_MS = 1200;
 	private static readonly SPEED_EPSILON = 0.01;
 
 	private readonly options: MediaRegistryOptions;
 	private readonly media = new Set<HTMLMediaElement>();
 	private readonly listeners = new WeakMap<HTMLMediaElement, ListenerBundle>();
-	private readonly observer: MutationObserver;
-	private readonly programmaticSpeedChanges = new WeakMap<
+	private readonly observedRoots = new Map<Node, MutationObserver>();
+	private readonly expectedProgrammaticSpeeds = new WeakMap<
+		HTMLMediaElement,
+		number
+	>();
+	private readonly pendingAdoptionFrames = new WeakMap<
 		HTMLMediaElement,
 		number
 	>();
@@ -54,103 +70,106 @@ export class MediaRegistry {
 		HTMLMediaElement,
 		number
 	>();
-	private readonly lifecycleStartedAt = new WeakMap<HTMLMediaElement, number>();
+	private readonly pendingLifecycleRestore = new WeakSet<HTMLMediaElement>();
+	private readonly mediaInteractionAt = new WeakMap<HTMLMediaElement, number>();
+	private readonly registrationOrder = new WeakMap<HTMLMediaElement, number>();
+	private readonly extensionOwnedMedia = new WeakSet<HTMLMediaElement>();
 	private readonly onDocumentInteraction = () => {
-		this.lastUserInteractionAt = performance.now();
+		const now = performance.now();
+		this.lastUserInteractionAt = now;
+		const target = this.resolveTargetMedia();
+		if (target) {
+			this.mediaInteractionAt.set(target, now);
+		}
 	};
-	private lastInteracted: HTMLMediaElement | null = null;
+
+	private activeMedia: HTMLMediaElement | null = null;
+	private isStarted = false;
+	private registryOrderCounter = 0;
 	private lastUserInteractionAt = 0;
+	private syncQueued = false;
+	private lastStateSignature = "";
 
 	constructor(options: MediaRegistryOptions) {
 		this.options = options;
-		this.observer = new MutationObserver((mutations) => {
-			let changed = false;
-
-			for (const mutation of mutations) {
-				mutation.addedNodes.forEach((node) => {
-					changed = this.registerNode(node) || changed;
-				});
-
-				mutation.removedNodes.forEach((node) => {
-					changed = this.unregisterNode(node) || changed;
-				});
-			}
-
-			if (changed) {
-				this.maybeApplyDesiredSpeed();
-				this.emitState();
-			}
-		});
 	}
 
 	start(): void {
-		this.registerNode(document.documentElement);
-		this.observer.observe(document.documentElement, {
-			childList: true,
-			subtree: true,
-		});
+		if (this.isStarted) return;
+		this.isStarted = true;
+		this.ensureObservedRoot(document.documentElement);
+		this.registerSubtree(document.documentElement);
 		document.addEventListener("pointerdown", this.onDocumentInteraction, true);
 		document.addEventListener("keydown", this.onDocumentInteraction, true);
-		this.applySettingsToMedia();
-		this.emitState();
+		this.queueSync();
 	}
 
 	stop(): void {
-		this.observer.disconnect();
+		for (const observer of this.observedRoots.values()) {
+			observer.disconnect();
+		}
+		this.observedRoots.clear();
 		document.removeEventListener(
 			"pointerdown",
 			this.onDocumentInteraction,
 			true,
 		);
 		document.removeEventListener("keydown", this.onDocumentInteraction, true);
+
 		for (const element of this.media) {
 			this.detachListeners(element);
 		}
+
 		this.media.clear();
-		this.lastInteracted = null;
+		this.activeMedia = null;
+		this.isStarted = false;
+		this.syncQueued = false;
+		this.lastStateSignature = "";
 	}
 
 	updateSettings(): void {
 		this.cleanupDisconnectedMedia();
-		this.applySettingsToMedia();
 		this.emitState();
 	}
 
+	canControlMedia(): boolean {
+		return this.resolveTargetMedia() !== null;
+	}
+
 	getState(): PopupState {
-		this.registerNode(document.documentElement);
 		this.cleanupDisconnectedMedia();
 		const settings = this.options.getSettings();
-		const active = this.getTargetMedia();
-		const activeKind = active
-			? active instanceof HTMLVideoElement
-				? "video"
-				: "audio"
-			: null;
+		const eligibleMedia = this.getEligibleMedia();
+		const active = this.resolveTargetMedia();
 
 		return {
-			hasMedia: this.getEligibleMedia().length > 0,
-			activeKind,
+			hasMedia: eligibleMedia.length > 0,
+			activeKind: active
+				? active instanceof HTMLVideoElement
+					? "video"
+					: "audio"
+				: null,
 			currentSpeed: active ? roundSpeed(active.playbackRate) : null,
 			siteDisabled: !settings.enabled,
 			hostname: this.options.hostname,
-			mediaCount: this.getEligibleMedia().length,
+			mediaCount: eligibleMedia.length,
 		};
 	}
 
 	async applyAction(action: ShortcutAction): Promise<number | null> {
-		this.registerNode(document.documentElement);
-		const target = this.getTargetMedia();
 		const settings = this.options.getSettings();
+		const target = this.resolveTargetMedia();
 		if (!settings.enabled || !target) return null;
 
-		let nextSpeed = target.playbackRate;
+		const baseSpeed = this.getActionBaseSpeed(target);
+		let nextSpeed = baseSpeed;
 
 		switch (action) {
 			case "increase":
-				nextSpeed = clampSpeed(target.playbackRate + settings.speedStep);
+				nextSpeed = clampSpeed(baseSpeed + settings.speedStep);
 				break;
 			case "decrease":
-				nextSpeed = clampSpeed(target.playbackRate - settings.speedStep);
+				nextSpeed = clampSpeed(baseSpeed - settings.speedStep);
 				break;
 			case "reset":
 				nextSpeed = 1;
@@ -164,21 +183,63 @@ export class MediaRegistry {
 	}
 
 	async applyExactSpeed(speed: number): Promise<number | null> {
-		this.registerNode(document.documentElement);
-		const target = this.getTargetMedia();
 		const settings = this.options.getSettings();
+		const target = this.resolveTargetMedia();
 		if (!settings.enabled || !target) return null;
 
 		const nextSpeed = clampSpeed(speed);
-		this.setMediaSpeed(target, nextSpeed);
-		this.lastInteracted = target;
+		this.activeMedia = target;
+		this.setPlaybackRate(target, nextSpeed, { extensionOwned: true });
 		await this.options.onSpeedPersist(nextSpeed);
 		this.emitState();
 		return nextSpeed;
 	}
 
 	private emitState(): void {
-		this.options.onStateChanged(this.getState());
+		const state = this.getState();
+		const signature = JSON.stringify(state);
+		if (signature === this.lastStateSignature) return;
+		this.lastStateSignature = signature;
+		this.options.onStateChanged(state);
+	}
+
+	private queueSync(): void {
+		if (this.syncQueued) return;
+		this.syncQueued = true;
+		queueMicrotask(() => {
+			this.syncQueued = false;
+			this.cleanupDisconnectedMedia();
+			this.resolveTargetMedia();
+			this.emitState();
+		});
+	}
+
+	private ensureObservedRoot(root: Node | null): void {
+		if (!root || this.observedRoots.has(root)) return;
+
+		const observer = new MutationObserver((mutations) => {
+			let changed = false;
+
+			for (const mutation of mutations) {
+				for (const node of Array.from(mutation.addedNodes)) {
+					changed = this.registerSubtree(node) || changed;
+				}
+
+				for (const node of Array.from(mutation.removedNodes)) {
+					changed = this.unregisterSubtree(node) || changed;
+				}
+			}
+
+			if (changed) {
+				this.queueSync();
+			}
+		});
+
+		observer.observe(root, {
+			childList: true,
+			subtree: true,
+		});
+		this.observedRoots.set(root, observer);
 	}
 
 	private cleanupDisconnectedMedia(): void {
@@ -189,153 +250,305 @@ export class MediaRegistry {
 			}
 		}
 
-		if (this.lastInteracted && !this.lastInteracted.isConnected) {
-			this.lastInteracted = null;
+		if (this.activeMedia && !this.activeMedia.isConnected) {
+			this.activeMedia = null;
 		}
 	}
 
 	private getEligibleMedia(): HTMLMediaElement[] {
 		const settings = this.options.getSettings();
-
 		return Array.from(this.media).filter((element) => {
 			if (!element.isConnected) return false;
-			if (!settings.workOnAudio && element instanceof HTMLAudioElement)
+			if (!settings.workOnAudio && element instanceof HTMLAudioElement) {
 				return false;
+			}
 			return isPlayableMedia(element);
 		});
 	}
 
-	private getPrimaryMediaCandidate(
-		eligibleMedia: HTMLMediaElement[],
-	): HTMLMediaElement | null {
-		if (eligibleMedia.length === 0) return null;
+	private getRegistrationOrder(element: HTMLMediaElement): number {
+		return this.registrationOrder.get(element) ?? Number.MAX_SAFE_INTEGER;
+	}
 
-		const playingVisibleVideo = eligibleMedia.find(
+	private getInteractionTimestamp(element: HTMLMediaElement): number {
+		return this.mediaInteractionAt.get(element) ?? 0;
+	}
+
+	private compareCandidates(
+		left: HTMLMediaElement,
+		right: HTMLMediaElement,
+	): number {
+		const interactionDiff =
+			this.getInteractionTimestamp(right) - this.getInteractionTimestamp(left);
+		if (interactionDiff !== 0) return interactionDiff;
+
+		if (left.paused !== right.paused) {
+			return left.paused ? 1 : -1;
+		}
+
+		const leftVisible = isVisibleVideo(left);
+		const rightVisible = isVisibleVideo(right);
+		if (leftVisible !== rightVisible) {
+			return rightVisible ? 1 : -1;
+		}
+
+		const areaDiff = getMediaArea(right) - getMediaArea(left);
+		if (areaDiff !== 0) return areaDiff;
+
+		if (
+			left instanceof HTMLVideoElement !==
+			right instanceof HTMLVideoElement
+		) {
+			return left instanceof HTMLVideoElement ? -1 : 1;
+		}
+
+		return this.getRegistrationOrder(left) - this.getRegistrationOrder(right);
+	}
+
+	private sortCandidates(candidates: HTMLMediaElement[]): HTMLMediaElement[] {
+		return [...candidates].sort((left, right) =>
+			this.compareCandidates(left, right),
+		);
+	}
+
+	private pickFromBucket(
+		candidates: HTMLMediaElement[],
+	): HTMLMediaElement | null {
+		return this.sortCandidates(candidates)[0] ?? null;
+	}
+
+	private resolveTargetMedia(
+		preferred: HTMLMediaElement | null = null,
+	): HTMLMediaElement | null {
+		const eligibleMedia = this.getEligibleMedia();
+		if (eligibleMedia.length === 0) {
+			this.activeMedia = null;
+			return null;
+		}
+
+		if (preferred && eligibleMedia.includes(preferred)) {
+			this.activeMedia = preferred;
+			return preferred;
+		}
+
+		const now = performance.now();
+		const recentlyInteracted = eligibleMedia.filter((element) => {
+			const interactedAt = this.getInteractionTimestamp(element);
+			return (
+				interactedAt > 0 &&
+				now - interactedAt <= MediaRegistry.TARGET_INTERACTION_WINDOW_MS
+			);
+		});
+		const recentTarget = this.pickFromBucket(recentlyInteracted);
+		if (recentTarget) {
+			this.activeMedia = recentTarget;
+			return recentTarget;
+		}
+
+		if (this.activeMedia && eligibleMedia.includes(this.activeMedia)) {
+			const currentActive = this.activeMedia;
+			if (!currentActive.paused || isVisibleVideo(currentActive)) {
+				return currentActive;
+			}
+		}
+
+		const playingVisibleVideos = eligibleMedia.filter(
 			(element) =>
 				element instanceof HTMLVideoElement &&
 				!element.paused &&
-				isVisible(element),
+				isVisibleVideo(element),
 		);
-		if (playingVisibleVideo) return playingVisibleVideo;
-
-		const visibleByArea = eligibleMedia
-			.filter((element) => isVisible(element))
-			.sort((left, right) => getElementArea(right) - getElementArea(left));
-
-		if (visibleByArea.length > 0) return visibleByArea[0];
-
-		return eligibleMedia[0];
-	}
-
-	private isUsableLastInteracted(
-		element: HTMLMediaElement,
-		eligibleMedia: HTMLMediaElement[],
-	): boolean {
-		return (
-			eligibleMedia.includes(element) &&
-			(element instanceof HTMLAudioElement ||
-				!element.paused ||
-				isVisible(element))
-		);
-	}
-
-	private getTargetMedia(): HTMLMediaElement | null {
-		const eligibleMedia = this.getEligibleMedia();
-		if (eligibleMedia.length === 0) return null;
-
-		if (
-			this.lastInteracted &&
-			this.isUsableLastInteracted(this.lastInteracted, eligibleMedia)
-		) {
-			return this.lastInteracted;
+		const playingVisibleVideoTarget = this.pickFromBucket(playingVisibleVideos);
+		if (playingVisibleVideoTarget) {
+			this.activeMedia = playingVisibleVideoTarget;
+			return playingVisibleVideoTarget;
 		}
 
-		return this.getPrimaryMediaCandidate(eligibleMedia);
-	}
-
-	private maybeApplyDesiredSpeed(): void {
-		const settings = this.options.getSettings();
-		if (!settings.enabled || !settings.forceSavedSpeedOnLoad) return;
-
-		const desiredSpeed = this.options.getDesiredSpeed();
-		const target = this.getTargetMedia();
-		if (!target) return;
-
-		this.setMediaSpeed(target, desiredSpeed);
-	}
-
-	private setMediaSpeed(element: HTMLMediaElement, speed: number): void {
-		const nextSpeed = clampSpeed(speed);
-		this.programmaticSpeedChanges.set(element, nextSpeed);
-		element.defaultPlaybackRate = nextSpeed;
-		element.playbackRate = nextSpeed;
-	}
-
-	private syncMediaDefaultSpeed(
-		element: HTMLMediaElement,
-		speed: number,
-	): void {
-		element.defaultPlaybackRate = clampSpeed(speed);
-	}
-
-	private shouldAdoptExternalRateChange(element: HTMLMediaElement): boolean {
-		const now = performance.now();
-		const recentlyInteracted =
-			now - this.lastUserInteractionAt <=
-			MediaRegistry.USER_INTERACTION_WINDOW_MS;
-		const eligibleMedia = this.getEligibleMedia();
-		const primaryCandidate = this.getPrimaryMediaCandidate(eligibleMedia);
-
-		return (
-			recentlyInteracted &&
-			(this.lastInteracted === element || primaryCandidate === element)
+		const visibleVideos = eligibleMedia.filter(
+			(element) =>
+				element instanceof HTMLVideoElement && isVisibleVideo(element),
 		);
+		const visibleVideoTarget = this.pickFromBucket(visibleVideos);
+		if (visibleVideoTarget) {
+			this.activeMedia = visibleVideoTarget;
+			return visibleVideoTarget;
+		}
+
+		const playingMedia = eligibleMedia.filter((element) => !element.paused);
+		const playingMediaTarget = this.pickFromBucket(playingMedia);
+		if (playingMediaTarget) {
+			this.activeMedia = playingMediaTarget;
+			return playingMediaTarget;
+		}
+
+		const fallback = this.pickFromBucket(eligibleMedia);
+		this.activeMedia = fallback;
+		return fallback;
 	}
 
-	private markLifecycleRestoreWindow(element: HTMLMediaElement): void {
-		const now = performance.now();
-		this.lifecycleStartedAt.set(element, now);
+	private getDesiredSpeed(): number {
+		return clampSpeed(this.options.getDesiredSpeed());
+	}
+
+	private readObservedPlaybackRate(element: HTMLMediaElement): number | null {
+		const observed = element.playbackRate;
+		if (!Number.isFinite(observed) || observed <= 0) {
+			return null;
+		}
+		return observed;
+	}
+
+	private getObservedPlaybackRate(element: HTMLMediaElement): number | null {
+		const observed = this.readObservedPlaybackRate(element);
+		return observed === null ? null : clampSpeed(observed);
+	}
+
+	private getActionBaseSpeed(element: HTMLMediaElement): number {
+		const observed = this.getObservedPlaybackRate(element);
+		if (observed !== null) {
+			return observed;
+		}
+		return this.getDesiredSpeed();
+	}
+
+	private markLifecycleWindow(element: HTMLMediaElement): void {
 		this.lifecycleRestoreUntil.set(
 			element,
-			now + MediaRegistry.LIFECYCLE_RESTORE_WINDOW_MS,
+			performance.now() + MediaRegistry.LIFECYCLE_RESTORE_WINDOW_MS,
 		);
+		this.pendingLifecycleRestore.add(element);
 	}
 
 	private isWithinLifecycleRestoreWindow(element: HTMLMediaElement): boolean {
 		return (this.lifecycleRestoreUntil.get(element) ?? 0) > performance.now();
 	}
 
-	private shouldTreatLifecycleRateChangeAsManual(
-		element: HTMLMediaElement,
-	): boolean {
-		const lifecycleStartedAt = this.lifecycleStartedAt.get(element) ?? 0;
-		const now = performance.now();
-		const recentlyInteracted =
-			now - this.lastUserInteractionAt <=
-			MediaRegistry.USER_INTERACTION_WINDOW_MS;
-
+	private isLikelyManualRateChange(element: HTMLMediaElement): boolean {
+		const interactedAt = this.getInteractionTimestamp(element);
 		return (
-			recentlyInteracted && this.lastUserInteractionAt > lifecycleStartedAt + 50
+			interactedAt > 0 &&
+			performance.now() - interactedAt <=
+				MediaRegistry.USER_INTERACTION_WINDOW_MS
 		);
 	}
 
-	private resetEligibleMediaToNormal(): void {
-		for (const element of this.getEligibleMedia()) {
-			this.setMediaSpeed(element, 1);
-		}
+	private shouldMaintainDesiredSpeed(element: HTMLMediaElement): boolean {
+		const settings = this.options.getSettings();
+		return (
+			settings.forceSavedSpeedOnLoad || this.extensionOwnedMedia.has(element)
+		);
 	}
 
-	private applySettingsToMedia(): void {
-		const settings = this.options.getSettings();
-		if (!settings.enabled) {
-			this.resetEligibleMediaToNormal();
+	private setPlaybackRate(
+		element: HTMLMediaElement,
+		speed: number,
+		options: { extensionOwned: boolean },
+	): void {
+		const nextSpeed = clampSpeed(speed);
+		const observed = this.getObservedPlaybackRate(element);
+		if (
+			observed !== null &&
+			isApproximatelyEqual(observed, nextSpeed, MediaRegistry.SPEED_EPSILON)
+		) {
+			if (options.extensionOwned) {
+				this.extensionOwnedMedia.add(element);
+			}
 			return;
 		}
 
-		this.maybeApplyDesiredSpeed();
+		this.expectedProgrammaticSpeeds.set(element, nextSpeed);
+		if (options.extensionOwned) {
+			this.extensionOwnedMedia.add(element);
+		}
+		element.playbackRate = nextSpeed;
 	}
 
-	private registerNode(node: Node): boolean {
+	private enforceDesiredSpeed(element: HTMLMediaElement): void {
+		this.setPlaybackRate(element, this.getDesiredSpeed(), {
+			extensionOwned: true,
+		});
+	}
+
+	private adoptExternalSpeed(element: HTMLMediaElement): void {
+		const adoptedSpeed = this.getObservedPlaybackRate(element);
+		if (adoptedSpeed === null) {
+			return;
+		}
+		this.activeMedia = element;
+		this.extensionOwnedMedia.add(element);
+		void this.options.onSpeedPersist(adoptedSpeed);
+	}
+
+	private cancelPendingAdoption(element: HTMLMediaElement): void {
+		const frameId = this.pendingAdoptionFrames.get(element);
+		if (typeof frameId === "number") {
+			cancelAnimationFrame(frameId);
+			this.pendingAdoptionFrames.delete(element);
+		}
+	}
+
+	private scheduleExternalSpeedAdoption(element: HTMLMediaElement): void {
+		this.cancelPendingAdoption(element);
+		const frameId = requestAnimationFrame(() => {
+			this.pendingAdoptionFrames.delete(element);
+			if (!this.media.has(element)) {
+				return;
+			}
+
+			const target = this.resolveTargetMedia(element);
+			if (target !== element) {
+				this.emitState();
+				return;
+			}
+
+			const observedSpeed = this.getObservedPlaybackRate(element);
+			if (observedSpeed === null) {
+				this.emitState();
+				return;
+			}
+
+			this.adoptExternalSpeed(element);
+			this.emitState();
+		});
+		this.pendingAdoptionFrames.set(element, frameId);
+	}
+
+	private handleLifecycleReady(element: HTMLMediaElement): void {
+		const target = this.resolveTargetMedia(element);
+		if (target !== element) {
+			this.emitState();
+			return;
+		}
+
+		if (
+			!this.pendingLifecycleRestore.has(element) &&
+			!this.isWithinLifecycleRestoreWindow(element)
+		) {
+			this.emitState();
+			return;
+		}
+
+		const settings = this.options.getSettings();
+		if (settings.enabled && settings.forceSavedSpeedOnLoad) {
+			const desiredSpeed = this.getDesiredSpeed();
+			const observedSpeed = this.getObservedPlaybackRate(element);
+			if (
+				observedSpeed === null ||
+				!isApproximatelyEqual(
+					observedSpeed,
+					desiredSpeed,
+					MediaRegistry.SPEED_EPSILON,
+				)
+			) {
+				this.enforceDesiredSpeed(element);
+			}
+		}
+
+		this.pendingLifecycleRestore.delete(element);
+		this.emitState();
+	}
+
+	private registerSubtree(node: Node): boolean {
 		let changed = false;
 
 		const visit = (candidate: Node): void => {
@@ -346,30 +559,39 @@ export class MediaRegistry {
 				changed = this.registerMediaElement(candidate) || changed;
 			}
 
-			if (!(candidate instanceof Element || candidate instanceof ShadowRoot))
+			if (!(candidate instanceof Element || candidate instanceof ShadowRoot)) {
 				return;
+			}
 
-			const elements =
-				"querySelectorAll" in candidate ? candidate.querySelectorAll("*") : [];
-			elements.forEach((element) => {
+			const ownerDocument = candidate.ownerDocument ?? document;
+			const walker = ownerDocument.createTreeWalker(
+				candidate,
+				NodeFilter.SHOW_ELEMENT,
+			);
+
+			let current: Node | null = walker.currentNode;
+			while (current) {
 				if (
-					element instanceof HTMLVideoElement ||
-					element instanceof HTMLAudioElement
+					current instanceof HTMLVideoElement ||
+					current instanceof HTMLAudioElement
 				) {
-					changed = this.registerMediaElement(element) || changed;
+					changed = this.registerMediaElement(current) || changed;
 				}
 
-				if (element.shadowRoot) {
-					visit(element.shadowRoot);
+				if (current instanceof Element && current.shadowRoot) {
+					this.ensureObservedRoot(current.shadowRoot);
+					visit(current.shadowRoot);
 				}
-			});
+
+				current = walker.nextNode();
+			}
 		};
 
 		visit(node);
 		return changed;
 	}
 
-	private unregisterNode(node: Node): boolean {
+	private unregisterSubtree(node: Node): boolean {
 		let changed = false;
 
 		const visit = (candidate: Node): void => {
@@ -380,23 +602,31 @@ export class MediaRegistry {
 				changed = this.unregisterMediaElement(candidate) || changed;
 			}
 
-			if (!(candidate instanceof Element || candidate instanceof ShadowRoot))
+			if (!(candidate instanceof Element || candidate instanceof ShadowRoot)) {
 				return;
+			}
 
-			const elements =
-				"querySelectorAll" in candidate ? candidate.querySelectorAll("*") : [];
-			elements.forEach((element) => {
+			const ownerDocument = candidate.ownerDocument ?? document;
+			const walker = ownerDocument.createTreeWalker(
+				candidate,
+				NodeFilter.SHOW_ELEMENT,
+			);
+
+			let current: Node | null = walker.currentNode;
+			while (current) {
 				if (
-					element instanceof HTMLVideoElement ||
-					element instanceof HTMLAudioElement
+					current instanceof HTMLVideoElement ||
+					current instanceof HTMLAudioElement
 				) {
-					changed = this.unregisterMediaElement(element) || changed;
+					changed = this.unregisterMediaElement(current) || changed;
 				}
 
-				if (element.shadowRoot) {
-					visit(element.shadowRoot);
+				if (current instanceof Element && current.shadowRoot) {
+					visit(current.shadowRoot);
 				}
-			});
+
+				current = walker.nextNode();
+			}
 		};
 
 		visit(node);
@@ -406,139 +636,153 @@ export class MediaRegistry {
 	private registerMediaElement(element: HTMLMediaElement): boolean {
 		if (this.media.has(element)) return false;
 		this.media.add(element);
+		this.registrationOrder.set(element, this.registryOrderCounter++);
 
 		const onMediaInteraction = () => {
-			this.lastInteracted = element;
-			this.emitState();
-		};
-
-		const onPlay = () => {
-			this.lastInteracted = element;
-			const settings = this.options.getSettings();
-			this.markLifecycleRestoreWindow(element);
-			if (!settings.enabled) {
-				this.setMediaSpeed(element, 1);
-			} else if (settings.forceSavedSpeedOnLoad) {
-				this.setMediaSpeed(element, this.options.getDesiredSpeed());
-			}
+			const now = performance.now();
+			this.lastUserInteractionAt = now;
+			this.mediaInteractionAt.set(element, now);
+			this.activeMedia = this.resolveTargetMedia(element);
 			this.emitState();
 		};
 
 		const onLoadedMetadata = () => {
-			const settings = this.options.getSettings();
-			this.markLifecycleRestoreWindow(element);
-			if (!settings.enabled) {
-				this.setMediaSpeed(element, 1);
-			} else if (settings.forceSavedSpeedOnLoad) {
-				this.setMediaSpeed(element, this.options.getDesiredSpeed());
-			}
+			this.markLifecycleWindow(element);
+			this.resolveTargetMedia(element);
 			this.emitState();
+		};
+
+		const onCanPlay = () => {
+			this.handleLifecycleReady(element);
+		};
+
+		const onPlaying = () => {
+			this.handleLifecycleReady(element);
 		};
 
 		const onRateChange = () => {
 			const expectedProgrammaticSpeed =
-				this.programmaticSpeedChanges.get(element);
+				this.expectedProgrammaticSpeeds.get(element);
 			if (typeof expectedProgrammaticSpeed === "number") {
+				const observedSpeed = this.getObservedPlaybackRate(element);
 				if (
-					Math.abs(element.playbackRate - expectedProgrammaticSpeed) <=
-					MediaRegistry.SPEED_EPSILON
+					observedSpeed !== null &&
+					isApproximatelyEqual(
+						observedSpeed,
+						expectedProgrammaticSpeed,
+						MediaRegistry.SPEED_EPSILON,
+					)
 				) {
-					this.programmaticSpeedChanges.delete(element);
+					this.expectedProgrammaticSpeeds.delete(element);
 					this.emitState();
 					return;
 				}
 
-				this.programmaticSpeedChanges.delete(element);
+				this.expectedProgrammaticSpeeds.delete(element);
+			}
+
+			const target = this.resolveTargetMedia(element);
+			if (target !== element) {
+				this.emitState();
+				return;
 			}
 
 			const settings = this.options.getSettings();
-			const desiredSpeed = this.options.getDesiredSpeed();
-			const eligibleMedia = this.getEligibleMedia();
-			const primaryCandidate = this.getPrimaryMediaCandidate(eligibleMedia);
-			const isTrackedTarget =
-				this.lastInteracted === element || primaryCandidate === element;
-			const withinLifecycleRestoreWindow =
-				this.isWithinLifecycleRestoreWindow(element);
-
 			if (!settings.enabled) {
-				if (Math.abs(element.playbackRate - 1) > MediaRegistry.SPEED_EPSILON) {
-					this.setMediaSpeed(element, 1);
-				}
 				this.emitState();
 				return;
 			}
 
-			if (withinLifecycleRestoreWindow) {
+			const observedSpeed = this.getObservedPlaybackRate(element);
+			if (observedSpeed === null) {
 				if (
-					isTrackedTarget &&
-					this.shouldTreatLifecycleRateChangeAsManual(element)
+					this.shouldMaintainDesiredSpeed(element) &&
+					!this.isWithinLifecycleRestoreWindow(element)
 				) {
-					this.lastInteracted = element;
-					this.syncMediaDefaultSpeed(element, element.playbackRate);
-					void this.options.onSpeedPersist(element.playbackRate);
-					this.emitState();
-					return;
+					this.enforceDesiredSpeed(element);
 				}
+				this.emitState();
+				return;
+			}
 
+			if (this.isWithinLifecycleRestoreWindow(element)) {
 				if (
-					settings.forceSavedSpeedOnLoad &&
-					isTrackedTarget &&
-					Math.abs(element.playbackRate - desiredSpeed) >
-						MediaRegistry.SPEED_EPSILON
+					this.shouldMaintainDesiredSpeed(element) &&
+					!isApproximatelyEqual(
+						observedSpeed,
+						this.getDesiredSpeed(),
+						MediaRegistry.SPEED_EPSILON,
+					)
 				) {
-					this.setMediaSpeed(element, desiredSpeed);
-					this.emitState();
-					return;
+					this.enforceDesiredSpeed(element);
 				}
-
 				this.emitState();
 				return;
 			}
 
-			if (this.shouldAdoptExternalRateChange(element)) {
-				this.lastInteracted = element;
-				this.syncMediaDefaultSpeed(element, element.playbackRate);
-				void this.options.onSpeedPersist(element.playbackRate);
+			if (this.isLikelyManualRateChange(element)) {
+				this.scheduleExternalSpeedAdoption(element);
 				this.emitState();
 				return;
 			}
 
-			if (
-				settings.forceSavedSpeedOnLoad &&
-				isTrackedTarget &&
-				Math.abs(element.playbackRate - desiredSpeed) >
-					MediaRegistry.SPEED_EPSILON
-			) {
-				this.setMediaSpeed(element, desiredSpeed);
-				this.emitState();
-				return;
+			if (this.shouldMaintainDesiredSpeed(element)) {
+				const desiredSpeed = this.getDesiredSpeed();
+				if (
+					!isApproximatelyEqual(
+						observedSpeed,
+						desiredSpeed,
+						MediaRegistry.SPEED_EPSILON,
+					)
+				) {
+					this.enforceDesiredSpeed(element);
+				}
 			}
-
 			this.emitState();
 		};
 
 		const listeners: ListenerBundle = {
 			onMediaInteraction,
-			onPlay,
 			onLoadedMetadata,
+			onCanPlay,
+			onPlaying,
 			onRateChange,
 		};
 
 		element.addEventListener("pointerdown", onMediaInteraction, true);
 		element.addEventListener("focus", onMediaInteraction, true);
-		element.addEventListener("play", onPlay, true);
 		element.addEventListener("loadedmetadata", onLoadedMetadata, true);
+		element.addEventListener("canplay", onCanPlay, true);
+		element.addEventListener("playing", onPlaying, true);
 		element.addEventListener("ratechange", onRateChange, true);
-
 		this.listeners.set(element, listeners);
+
+		if (element.readyState > 0 || !element.paused) {
+			queueMicrotask(() => {
+				if (!this.media.has(element)) return;
+				this.markLifecycleWindow(element);
+				if (
+					element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ||
+					!element.paused
+				) {
+					this.handleLifecycleReady(element);
+				} else {
+					this.emitState();
+				}
+			});
+		}
+
 		return true;
 	}
 
 	private unregisterMediaElement(element: HTMLMediaElement): boolean {
 		if (!this.media.has(element)) return false;
+		this.cancelPendingAdoption(element);
 		this.detachListeners(element);
 		this.media.delete(element);
-		if (this.lastInteracted === element) this.lastInteracted = null;
+		if (this.activeMedia === element) {
+			this.activeMedia = null;
+		}
 		return true;
 	}
 
@@ -552,12 +796,13 @@ export class MediaRegistry {
 			true,
 		);
 		element.removeEventListener("focus", listeners.onMediaInteraction, true);
-		element.removeEventListener("play", listeners.onPlay, true);
 		element.removeEventListener(
 			"loadedmetadata",
 			listeners.onLoadedMetadata,
 			true,
 		);
+		element.removeEventListener("canplay", listeners.onCanPlay, true);
+		element.removeEventListener("playing", listeners.onPlaying, true);
 		element.removeEventListener("ratechange", listeners.onRateChange, true);
 		this.listeners.delete(element);
 	}

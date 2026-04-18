@@ -26,6 +26,11 @@ interface FrameStateEntry {
 	state: PopupState;
 }
 
+interface PersistedTabState {
+	frameId: number;
+	state: PopupState;
+}
+
 type BadgeApi = {
 	setBadgeBackgroundColor(details: {
 		tabId?: number;
@@ -45,8 +50,8 @@ type StorageAreaLike = {
 	remove(keys: string | string[]): Promise<void>;
 };
 
-const PERSISTED_FRAME_ID = -1;
 const frameStatesByTab = new Map<number, Map<number, PopupState>>();
+const lastSuccessfulFrameByTab = new Map<number, number>();
 const popupPorts = new Set<browser.Runtime.Port>();
 
 function isMissingTabError(error: unknown): boolean {
@@ -109,21 +114,21 @@ async function clearLocalTabStateFallbackCache(): Promise<void> {
 
 async function readPersistedTabState(
 	tabId: number,
-): Promise<PopupState | null> {
+): Promise<PersistedTabState | null> {
 	const key = getPersistedTabStateKey(tabId);
 	const stored = await getTabStateStorageArea().get(key);
-	return (stored[key] as PopupState | undefined) ?? null;
+	return (stored[key] as PersistedTabState | undefined) ?? null;
 }
 
 async function writePersistedTabState(
 	tabId: number,
-	state: PopupState | null,
+	entry: FrameStateEntry | null,
 ): Promise<void> {
 	const key = getPersistedTabStateKey(tabId);
 	const storageArea = getTabStateStorageArea();
 
-	if (state) {
-		await storageArea.set({ [key]: state });
+	if (entry) {
+		await storageArea.set({ [key]: entry });
 	} else {
 		await storageArea.remove(key);
 	}
@@ -140,8 +145,7 @@ function getTabFrameStates(tabId: number): Map<number, PopupState> {
 
 function hasLiveFrameState(tabId: number): boolean {
 	const states = frameStatesByTab.get(tabId);
-	if (!states) return false;
-	return Array.from(states.keys()).some((frameId) => frameId >= 0);
+	return Boolean(states && states.size > 0);
 }
 
 function setFrameState(
@@ -149,29 +153,43 @@ function setFrameState(
 	frameId: number,
 	state: PopupState,
 ): void {
-	const states = getTabFrameStates(tabId);
-	if (frameId >= 0) {
-		states.delete(PERSISTED_FRAME_ID);
+	getTabFrameStates(tabId).set(frameId, state);
+	if (state.hasMedia) {
+		lastSuccessfulFrameByTab.set(tabId, frameId);
 	}
-	states.set(frameId, state);
+}
+
+function removeFrameState(tabId: number, frameId: number): void {
+	const states = frameStatesByTab.get(tabId);
+	if (!states) return;
+	states.delete(frameId);
+	if (states.size === 0) {
+		frameStatesByTab.delete(tabId);
+	}
+	if (lastSuccessfulFrameByTab.get(tabId) === frameId) {
+		lastSuccessfulFrameByTab.delete(tabId);
+	}
 }
 
 async function hydratePersistedTabState(
 	tabId: number,
-): Promise<PopupState | null> {
+): Promise<FrameStateEntry | null> {
 	if (hasLiveFrameState(tabId)) {
-		return getBestState(tabId);
+		return getBestEntry(tabId);
 	}
 
 	const persisted = await readPersistedTabState(tabId);
 	if (persisted) {
-		getTabFrameStates(tabId).set(PERSISTED_FRAME_ID, persisted);
+		setFrameState(tabId, persisted.frameId, persisted.state);
+		return persisted;
 	}
-	return persisted;
+
+	return null;
 }
 
 async function clearTabState(tabId: number): Promise<void> {
 	frameStatesByTab.delete(tabId);
+	lastSuccessfulFrameByTab.delete(tabId);
 	await writePersistedTabState(tabId, null);
 }
 
@@ -184,21 +202,66 @@ function getFrameEntries(tabId: number): FrameStateEntry[] {
 	}));
 }
 
-function getStateScore(entry: FrameStateEntry): number {
-	let score = 0;
-	if (entry.state.hasMedia) score += 100;
-	if (entry.state.currentSpeed !== null) score += 10;
-	if (entry.state.activeKind === "video") score += 5;
-	if (entry.frameId === 0) score += 1;
-	return score;
+function compareFrameEntries(
+	tabId: number,
+	left: FrameStateEntry,
+	right: FrameStateEntry,
+): number {
+	const lastSuccessfulFrameId = lastSuccessfulFrameByTab.get(tabId);
+	if (
+		lastSuccessfulFrameId === left.frameId ||
+		lastSuccessfulFrameId === right.frameId
+	) {
+		if (
+			lastSuccessfulFrameId === left.frameId &&
+			lastSuccessfulFrameId !== right.frameId
+		) {
+			return -1;
+		}
+		if (
+			lastSuccessfulFrameId === right.frameId &&
+			lastSuccessfulFrameId !== left.frameId
+		) {
+			return 1;
+		}
+	}
+
+	if (left.state.hasMedia !== right.state.hasMedia) {
+		return left.state.hasMedia ? -1 : 1;
+	}
+
+	if (left.state.siteDisabled !== right.state.siteDisabled) {
+		return left.state.siteDisabled ? 1 : -1;
+	}
+
+	if (left.state.activeKind !== right.state.activeKind) {
+		if (left.state.activeKind === "video") return -1;
+		if (right.state.activeKind === "video") return 1;
+		if (left.state.activeKind === "audio") return -1;
+		if (right.state.activeKind === "audio") return 1;
+	}
+
+	const leftHasSpeed = typeof left.state.currentSpeed === "number";
+	const rightHasSpeed = typeof right.state.currentSpeed === "number";
+	if (leftHasSpeed !== rightHasSpeed) {
+		return leftHasSpeed ? -1 : 1;
+	}
+
+	if (left.state.mediaCount !== right.state.mediaCount) {
+		return right.state.mediaCount - left.state.mediaCount;
+	}
+
+	return left.frameId - right.frameId;
 }
 
-function getBestState(tabId: number): PopupState | null {
+function getOrderedFrameEntries(tabId: number): FrameStateEntry[] {
 	const entries = getFrameEntries(tabId);
-	if (entries.length === 0) return null;
+	entries.sort((left, right) => compareFrameEntries(tabId, left, right));
+	return entries;
+}
 
-	entries.sort((left, right) => getStateScore(right) - getStateScore(left));
-	return entries[0]?.state ?? null;
+function getBestEntry(tabId: number): FrameStateEntry | null {
+	return getOrderedFrameEntries(tabId)[0] ?? null;
 }
 
 function isBadgeStateStable(state: PopupState | null): state is PopupState {
@@ -229,7 +292,8 @@ function notifyPopupPorts(tabId: number, state: PopupState | null): void {
 }
 
 async function applyBadge(tabId: number): Promise<void> {
-	const state = getBestState(tabId);
+	const entry = getBestEntry(tabId);
+	const state = entry?.state ?? null;
 	const preserveExistingBadge = Boolean(
 		state &&
 			typeof state.currentSpeed === "number" &&
@@ -260,14 +324,14 @@ async function applyBadge(tabId: number): Promise<void> {
 		}
 	}
 
-	await writePersistedTabState(tabId, state);
+	await writePersistedTabState(tabId, entry);
 	notifyPopupPorts(tabId, state);
 }
 
 async function sendContentMessage(
 	tabId: number,
 	message: ContentRequestMessage,
-	frameId = 0,
+	frameId: number,
 ): Promise<PopupState | null> {
 	if (!(await tabExists(tabId))) {
 		await clearTabState(tabId);
@@ -280,6 +344,7 @@ async function sendContentMessage(
 		});
 		return (response as PopupState | null | undefined) ?? null;
 	} catch (error) {
+		removeFrameState(tabId, frameId);
 		if (isMissingTabError(error)) {
 			await clearTabState(tabId);
 		}
@@ -287,17 +352,30 @@ async function sendContentMessage(
 	}
 }
 
-async function refreshTopFrameState(tabId: number): Promise<PopupState | null> {
-	const state = await sendContentMessage(
-		tabId,
-		{ type: MESSAGE_TYPES.getState },
-		0,
-	);
-	if (state) {
-		setFrameState(tabId, 0, state);
+function getPreferredFrameIds(tabId: number): number[] {
+	const frameIds = getOrderedFrameEntries(tabId).map((entry) => entry.frameId);
+	frameIds.push(0);
+	return Array.from(new Set(frameIds));
+}
+
+async function refreshPreferredFrameStates(
+	tabId: number,
+): Promise<FrameStateEntry | null> {
+	const frameIds = getPreferredFrameIds(tabId);
+
+	for (const frameId of frameIds) {
+		const state = await sendContentMessage(
+			tabId,
+			{ type: MESSAGE_TYPES.getState },
+			frameId,
+		);
+		if (!state) continue;
+
+		setFrameState(tabId, frameId, state);
 	}
+
 	await applyBadge(tabId);
-	return getBestState(tabId);
+	return getBestEntry(tabId);
 }
 
 async function getTabState(tabId: number): Promise<TabStateResponse> {
@@ -307,15 +385,11 @@ async function getTabState(tabId: number): Promise<TabStateResponse> {
 	}
 
 	await hydratePersistedTabState(tabId);
-	const cachedState = getBestState(tabId);
-	const freshState = await refreshTopFrameState(tabId);
-
-	return {
-		state: freshState ?? cachedState ?? null,
-	};
+	const entry = await refreshPreferredFrameStates(tabId);
+	return { state: entry?.state ?? null };
 }
 
-async function relayToTopFrame(
+async function relayToBestFrame(
 	tabId: number,
 	message: ContentRequestMessage,
 ): Promise<TabStateResponse> {
@@ -325,16 +399,23 @@ async function relayToTopFrame(
 	}
 
 	await hydratePersistedTabState(tabId);
+	const frameIds = getPreferredFrameIds(tabId);
 
-	const response = await sendContentMessage(tabId, message, 0);
-	if (response) {
-		setFrameState(tabId, 0, response);
+	for (const frameId of frameIds) {
+		const response = await sendContentMessage(tabId, message, frameId);
+		if (!response) continue;
+
+		setFrameState(tabId, frameId, response);
+		if (!response.hasMedia) {
+			continue;
+		}
+
 		await applyBadge(tabId);
 		return { state: response };
 	}
 
-	const cachedState = getBestState(tabId);
-	return { state: cachedState };
+	await applyBadge(tabId);
+	return { state: getBestEntry(tabId)?.state ?? null };
 }
 
 export default defineBackground(() => {
@@ -372,7 +453,7 @@ export default defineBackground(() => {
 
 		const applyTabActionMessage = message as ApplyTabActionMessage;
 		if (applyTabActionMessage?.type === MESSAGE_TYPES.applyTabAction) {
-			return relayToTopFrame(applyTabActionMessage.payload.tabId, {
+			return relayToBestFrame(applyTabActionMessage.payload.tabId, {
 				type: MESSAGE_TYPES.applyAction,
 				payload: { action: applyTabActionMessage.payload.action },
 			} satisfies ApplyActionMessage);
@@ -380,7 +461,7 @@ export default defineBackground(() => {
 
 		const applyTabExactSpeedMessage = message as ApplyTabExactSpeedMessage;
 		if (applyTabExactSpeedMessage?.type === MESSAGE_TYPES.applyTabExactSpeed) {
-			return relayToTopFrame(applyTabExactSpeedMessage.payload.tabId, {
+			return relayToBestFrame(applyTabExactSpeedMessage.payload.tabId, {
 				type: MESSAGE_TYPES.applyExactSpeed,
 				payload: { speed: applyTabExactSpeedMessage.payload.speed },
 			} satisfies ApplyExactSpeedMessage);

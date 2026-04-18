@@ -1,5 +1,4 @@
 export type SaveScope = "global" | "site";
-
 export type ShortcutAction = "increase" | "decrease" | "reset" | "preferred";
 
 export interface ShortcutConfig {
@@ -22,9 +21,15 @@ export interface AppSettings {
 	shortcuts: ShortcutConfig;
 }
 
+export interface SavedSpeedEntry {
+	value: number;
+	updatedAt: number;
+	source?: "explicit";
+}
+
 export interface PersistedPlaybackState {
-	globalLastSpeed: number | null;
-	siteLastSpeed: Record<string, number>;
+	globalLastSpeed: SavedSpeedEntry | null;
+	siteLastSpeed: Record<string, SavedSpeedEntry>;
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutConfig = {

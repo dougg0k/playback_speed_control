@@ -1,6 +1,6 @@
 export function clampSpeed(value: number): number {
 	if (Number.isNaN(value) || !Number.isFinite(value)) return 1;
-	return Math.min(16, Math.max(0.07, Number(value.toFixed(2))));
+	return Math.min(16, Math.max(0.1, Number(value.toFixed(2))));
 }
 
 export function roundSpeed(value: number): number {

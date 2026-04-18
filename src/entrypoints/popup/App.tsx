@@ -71,36 +71,15 @@ function applyPopupState(
 }
 
 async function requestTabState(tabId: number): Promise<PopupState | null> {
-	if (!(await safeTabExists(tabId))) {
-		return null;
-	}
-
-	let bestState: PopupState | null = null;
-
-	try {
-		const directResponse = (await browser.tabs.sendMessage(
-			tabId,
-			{ type: MESSAGE_TYPES.getState },
-			{ frameId: 0 },
-		)) as PopupState | null | undefined;
-		bestState = pickBetterState(bestState, directResponse ?? null);
-	} catch (error) {
-		if (!isMissingTabError(error)) {
-			// Fall through to background cache/fallback.
-		}
-	}
-
 	try {
 		const response = (await browser.runtime.sendMessage({
 			type: MESSAGE_TYPES.getTabState,
 			payload: { tabId },
 		} satisfies GetTabStateMessage)) as TabStateResponse | null | undefined;
-		bestState = pickBetterState(bestState, response?.state ?? null);
+		return response?.state ?? null;
 	} catch {
-		// Ignore background fallback failures.
+		return null;
 	}
-
-	return bestState;
 }
 
 async function requestPopupStatus(
@@ -218,53 +197,23 @@ function App() {
 	) => {
 		const tabId = popupStatus.activeTabId;
 		if (!tabId) return;
-		if (!(await safeTabExists(tabId))) {
-			setPopupStatus((current) => ({
-				...current,
-				activeTabId: null,
-				state: null,
-				unavailableReason: "No active tab.",
-			}));
-			return;
-		}
 
 		try {
-			let response: PopupState | null = null;
+			const response = (await browser.runtime.sendMessage(message)) as
+				| TabStateResponse
+				| null
+				| undefined;
 
-			if (message.type === MESSAGE_TYPES.applyTabAction) {
-				response = (await browser.tabs.sendMessage(
-					tabId,
-					{
-						type: MESSAGE_TYPES.applyAction,
-						payload: { action: message.payload.action },
-					} satisfies ApplyActionMessage,
-					{ frameId: 0 },
-				)) as PopupState | null | undefined;
-			} else {
-				response = (await browser.tabs.sendMessage(
-					tabId,
-					{
-						type: MESSAGE_TYPES.applyExactSpeed,
-						payload: { speed: message.payload.speed },
-					} satisfies ApplyExactSpeedMessage,
-					{ frameId: 0 },
-				)) as PopupState | null | undefined;
-			}
-
-			setPopupStatus((current) =>
-				applyPopupState(current, response ?? current.state),
-			);
-		} catch (error) {
-			if (isMissingTabError(error)) {
-				setPopupStatus((current) => ({
-					...current,
-					activeTabId: null,
-					state: null,
-					unavailableReason: "No active tab.",
-				}));
+			if (response?.state) {
+				setPopupStatus((current) => applyPopupState(current, response.state));
 				return;
 			}
 
+			const refreshedState = await requestTabState(tabId);
+			setPopupStatus((current) =>
+				applyPopupState(current, refreshedState ?? current.state),
+			);
+		} catch {
 			const refreshedState = await requestTabState(tabId);
 			setPopupStatus((current) =>
 				applyPopupState(current, refreshedState ?? current.state),
@@ -425,7 +374,7 @@ function App() {
 						<span>Preferred speed</span>
 						<input
 							type="number"
-							min="0.07"
+							min="0.1"
 							max="16"
 							step="0.05"
 							value={settings.preferredSpeed}
@@ -486,7 +435,7 @@ function App() {
 								<div className="action-field">
 									<input
 										type="number"
-										min="0.07"
+										min="0.1"
 										max="16"
 										step="0.05"
 										defaultValue={settings.preferredSpeed}
