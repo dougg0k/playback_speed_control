@@ -38,7 +38,7 @@ export const DEFAULT_SHORTCUTS: ShortcutConfig = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	enabled: true,
-	preferredSpeed: 1,
+	preferredSpeed: 1.5,
 	speedStep: 0.1,
 	rememberLastSpeed: true,
 	autoRestoreSpeedOnNewMedia: true,

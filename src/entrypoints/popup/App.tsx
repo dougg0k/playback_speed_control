@@ -5,7 +5,6 @@ import { isEditableTarget, matchShortcutAction } from "@/core/shortcuts";
 import { normalizeRules } from "@/core/siteRules";
 import type {
 	ApplyTabActionMessage,
-	ApplyTabExactSpeedMessage,
 	GetTabStateMessage,
 	PopupState,
 	TabStateChangedMessage,
@@ -156,9 +155,7 @@ function App() {
 		};
 	}, []);
 
-	const sendAction = async (
-		message: ApplyTabActionMessage | ApplyTabExactSpeedMessage,
-	) => {
+	const sendAction = async (message: ApplyTabActionMessage) => {
 		const tabId = popupStatus.activeTabId;
 		if (!tabId) return;
 
@@ -334,7 +331,7 @@ function App() {
 				</div>
 
 				<div className="inline-field-row">
-					<label className="field field-inline">
+					<label className="field field-inline field-preferred">
 						<span>Preferred speed</span>
 						<input
 							type="number"
@@ -347,6 +344,25 @@ function App() {
 									preferredSpeed: parseSpeedInput(
 										event.target.value,
 										settings.preferredSpeed,
+									),
+								})
+							}
+						/>
+					</label>
+
+					<label className="field field-inline field-step">
+						<span>Step size</span>
+						<input
+							type="number"
+							min="0.05"
+							max="4"
+							step="0.05"
+							value={settings.speedStep}
+							onChange={(event) =>
+								void saveSettings({
+									speedStep: parseSpeedInput(
+										event.target.value,
+										settings.speedStep,
 									),
 								})
 							}
@@ -368,64 +384,6 @@ function App() {
 
 			{isExpanded ? (
 				<section className="settings-panel">
-					<div className="settings-group">
-						<div className="section-heading">
-							<h3>Playback</h3>
-							<span>
-								Keep the frequent adjustments compact and predictable.
-							</span>
-						</div>
-						<div className="grid-two">
-							<label className="field">
-								<span>Step size</span>
-								<input
-									type="number"
-									min="0.05"
-									max="4"
-									step="0.05"
-									value={settings.speedStep}
-									onChange={(event) =>
-										void saveSettings({
-											speedStep: parseSpeedInput(
-												event.target.value,
-												settings.speedStep,
-											),
-										})
-									}
-								/>
-							</label>
-							<label className="field">
-								<span>Apply exact speed</span>
-								<div className="action-field">
-									<input
-										type="number"
-										min="0.1"
-										max="16"
-										step="0.05"
-										defaultValue={settings.preferredSpeed}
-										onKeyDown={(event) => {
-											if (event.key !== "Enter") return;
-											if (!popupStatus.activeTabId) return;
-
-											const nextSpeed = parseSpeedInput(
-												(event.currentTarget as HTMLInputElement).value,
-												settings.preferredSpeed,
-											);
-											void sendAction({
-												type: MESSAGE_TYPES.applyTabExactSpeed,
-												payload: {
-													tabId: popupStatus.activeTabId,
-													speed: nextSpeed,
-												},
-											} satisfies ApplyTabExactSpeedMessage);
-										}}
-									/>
-									<span className="input-hint">Press Enter</span>
-								</div>
-							</label>
-						</div>
-					</div>
-
 					<div className="settings-group">
 						<div className="section-heading">
 							<h3>Persistence</h3>

@@ -35,13 +35,6 @@ body {
 	overflow-y: auto;
 }
 
-@supports (-moz-appearance: none) {
-	html,
-	body {
-		scrollbar-gutter: stable;
-	}
-}
-
 body {
 	min-height: auto;
 	font-size: 14px;

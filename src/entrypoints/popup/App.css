@@ -101,6 +101,7 @@
 	font-size: 13px;
 	line-height: 1.15;
 	font-weight: 600;
+	white-space: nowrap;
 	transition:
 		background-color 120ms ease,
 		border-color 120ms ease,
@@ -133,8 +134,8 @@
 
 .inline-field-row {
 	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	gap: 10px;
+	grid-template-columns: minmax(96px, 112px) minmax(84px, 96px) minmax(0, 1fr);
+	gap: 8px;
 	align-items: end;
 }
 
@@ -146,6 +147,14 @@
 
 .field-inline {
 	min-width: 0;
+}
+
+.field-preferred {
+	max-width: 112px;
+}
+
+.field-step {
+	max-width: 96px;
 }
 
 .field span,

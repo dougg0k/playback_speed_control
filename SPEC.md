@@ -111,6 +111,7 @@ Should expose only the high-frequency controls:
 - speed down
 - reset to `1x`
 - preferred speed quick control
+- step size quick control
 - current host enabled/disabled state
 - optional audio toggle shortcut/access if needed
 
@@ -119,13 +120,14 @@ Should expose only the high-frequency controls:
 Should expose:
 
 - keyboard shortcut mapping/config
-- preferred/default speed
 - remember last speed toggle
 - auto-restore speed on new media toggle
 - audio support toggle
 - disabled sites list
 - optional toast toggle
 - any additional minimal settings that directly support playback speed behavior
+
+Preferred speed and step size should live in the compact view beside the main playback controls, so the expanded settings view does not need a separate playback section for those inputs.
 
 ### UI principle
 
@@ -192,7 +194,7 @@ Initial default values are:
 
 - speed step: `0.1`
 - reset speed: `1.0`
-- preferred/default speed: `1.0`
+- preferred/default speed: `1.5`
 - auto-restore speed on new media: enabled
 
 These are defaults only, not hard-coded constraints.
@@ -615,19 +617,20 @@ Provide immediate feedback when speed changes via keyboard shortcuts.
 - plus/increase action
 - reset action
 - preferred/default speed quick action or input
+- step size quick input
 - current site enabled/disabled toggle
 - entry to expand settings
 
 ## 14.2 Expanded settings contents
 
-- preferred speed input
-- step size input
 - remember last speed toggle
 - auto-restore speed on new media toggle
 - audio support toggle
 - toast toggle
 - disabled sites editor
 - shortcut editor
+
+The expanded settings view should not add a separate playback section when preferred speed and step size are already exposed in the compact view.
 
 ## 14.3 UX rules
 
