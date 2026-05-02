@@ -15,6 +15,8 @@ import { DEFAULT_SETTINGS } from "@/types/settings";
 import { formatSpeed } from "@/utils/numbers";
 import { getHostnameFromUrl } from "@/utils/urls";
 import { browser } from "wxt/browser";
+import minusIcon from "@/assets/minus.svg";
+import plusIcon from "@/assets/plus.svg";
 import { ShortcutEditor } from "./components/ShortcutEditor";
 import "./App.css";
 
@@ -272,6 +274,7 @@ function App() {
 					<button
 						className="control-button"
 						type="button"
+						aria-label="Decrease speed"
 						disabled={!popupStatus.activeTabId}
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
@@ -281,11 +284,12 @@ function App() {
 							} satisfies ApplyTabActionMessage);
 						}}
 					>
-						−
+						<img className="control-icon" src={minusIcon} alt="" aria-hidden="true" />
 					</button>
 					<button
 						className="control-button control-button-primary"
 						type="button"
+						aria-label="Increase speed"
 						disabled={!popupStatus.activeTabId}
 						onClick={() => {
 							if (!popupStatus.activeTabId) return;
@@ -295,7 +299,7 @@ function App() {
 							} satisfies ApplyTabActionMessage);
 						}}
 					>
-						+
+						<img className="control-icon" src={plusIcon} alt="" aria-hidden="true" />
 					</button>
 					<button
 						className="control-button"
@@ -384,12 +388,12 @@ function App() {
 
 			{isExpanded ? (
 				<section className="settings-panel">
+
 					<div className="settings-group">
 						<div className="section-heading">
 							<h3>Persistence</h3>
 							<span>
-								Control what speed is remembered for this host and how the
-								selected speed gets reused on new media.
+								Control what speed is remembered for this host and how the selected speed gets reused on new media.
 							</span>
 						</div>
 						<label className="toggle-row">
@@ -409,10 +413,7 @@ function App() {
 						<label className="toggle-row">
 							<div>
 								<strong>Auto-restore speed on new media</strong>
-								<p>
-									Apply the current selected speed when a new media element
-									becomes active.
-								</p>
+								<p>Apply the current selected speed when a new media element becomes active.</p>
 							</div>
 							<input
 								type="checkbox"

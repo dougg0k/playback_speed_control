@@ -240,7 +240,7 @@ Optional setting to apply the current selected speed when a new media element be
 
 Important distinction:
 
-- **preferred speed** = the fallback selected speed when there is no remembered speed for the current host
+- **preferred speed** = an explicit action target used only by the Preferred button or preferred-speed shortcut
 - **remember last speed** = persist the current selected speed for the current host after a real speed change
 - **auto-restore speed on new media** = apply the already selected speed to a newly active media element
 
@@ -248,7 +248,7 @@ Implementation rules:
 
 - remember-last-speed is the persistence path only
 - auto-restore-on-new-media is the restore/apply path only
-- the selected speed is initialized from remembered host speed when available; otherwise it falls back to preferred speed
+- the selected speed is initialized from remembered host speed when available; otherwise no extension-owned startup speed is applied
 - auto-restore on new media applies the current selected speed for the session; it must not decide what the remembered speed becomes
 
 Runtime rules:

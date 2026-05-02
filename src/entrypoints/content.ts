@@ -56,16 +56,12 @@ export default defineContentScript({
 
 		const loadDesiredSpeed = async (
 			nextSettings: AppSettings,
-		): Promise<number> => {
-			if (!nextSettings.enabled) {
-				return nextSettings.preferredSpeed;
+		): Promise<number | null> => {
+			if (!nextSettings.enabled || !nextSettings.rememberLastSpeed) {
+				return null;
 			}
 
-			const remembered = nextSettings.rememberLastSpeed
-				? await getRememberedSpeed(hostname)
-				: null;
-
-			return remembered ?? nextSettings.preferredSpeed;
+			return getRememberedSpeed(hostname);
 		};
 
 		const createDormantState = (): PopupState => ({
@@ -78,7 +74,7 @@ export default defineContentScript({
 		});
 
 		let settings: AppSettings = resolveSettings(DEFAULT_SETTINGS);
-		let desiredSpeed = settings.preferredSpeed;
+		let desiredSpeed: number | null = null;
 		let registry: MediaRegistry | null = null;
 		let bootstrapObserver: MutationObserver | null = null;
 

@@ -4,7 +4,7 @@ import { clampSpeed } from "@/utils/numbers";
 
 export interface MediaRegistryOptions {
 	getSettings: () => AppSettings;
-	getDesiredSpeed: () => number;
+	getDesiredSpeed: () => number | null;
 	onSpeedPersist: (speed: number) => void | Promise<void>;
 	onStateChanged: (state: PopupState) => void;
 	hostname: string;
@@ -414,10 +414,7 @@ export class MediaRegistry {
 	}
 
 	private getBaseSpeed(element: HTMLMediaElement): number {
-		return (
-			normalizeObservedSpeed(element.playbackRate) ??
-			clampSpeed(this.options.getDesiredSpeed())
-		);
+		return normalizeObservedSpeed(element.playbackRate) ?? 1;
 	}
 
 	private setPlaybackRate(element: HTMLMediaElement, speed: number): void {
@@ -468,14 +465,19 @@ export class MediaRegistry {
 			return observedSpeed;
 		}
 
-		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
-		if (observedSpeed === null) {
-			return desiredSpeed;
+		const desiredSpeed = this.options.getDesiredSpeed();
+		if (desiredSpeed === null) {
+			return observedSpeed;
 		}
 
-		return isApproximatelyEqual(observedSpeed, desiredSpeed)
+		const normalizedDesiredSpeed = clampSpeed(desiredSpeed);
+		if (observedSpeed === null) {
+			return normalizedDesiredSpeed;
+		}
+
+		return isApproximatelyEqual(observedSpeed, normalizedDesiredSpeed)
 			? observedSpeed
-			: desiredSpeed;
+			: normalizedDesiredSpeed;
 	}
 
 	private shouldAdoptExternalRateChange(
@@ -501,8 +503,12 @@ export class MediaRegistry {
 			return false;
 		}
 
-		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
-		return !isApproximatelyEqual(speed, desiredSpeed);
+		const desiredSpeed = this.options.getDesiredSpeed();
+		if (desiredSpeed === null) {
+			return true;
+		}
+
+		return !isApproximatelyEqual(speed, clampSpeed(desiredSpeed));
 	}
 
 	private restoreDesiredSpeed(element: HTMLMediaElement): void {
@@ -515,16 +521,21 @@ export class MediaRegistry {
 			return;
 		}
 
-		const desiredSpeed = clampSpeed(this.options.getDesiredSpeed());
+		const desiredSpeed = this.options.getDesiredSpeed();
+		if (desiredSpeed === null) {
+			return;
+		}
+
+		const normalizedDesiredSpeed = clampSpeed(desiredSpeed);
 		const currentSpeed = normalizeObservedSpeed(element.playbackRate);
 		if (
 			currentSpeed !== null &&
-			isApproximatelyEqual(currentSpeed, desiredSpeed)
+			isApproximatelyEqual(currentSpeed, normalizedDesiredSpeed)
 		) {
 			return;
 		}
 
-		this.setPlaybackRate(element, desiredSpeed);
+		this.setPlaybackRate(element, normalizedDesiredSpeed);
 	}
 
 	private restoreStartupSpeed(element: HTMLMediaElement): void {
@@ -614,11 +625,10 @@ export class MediaRegistry {
 			}
 
 			if (!this.shouldAdoptExternalRateChange(element, observedSpeed)) {
+				const desiredSpeed = this.options.getDesiredSpeed();
 				if (
-					!isApproximatelyEqual(
-						observedSpeed,
-						clampSpeed(this.options.getDesiredSpeed()),
-					)
+					desiredSpeed !== null &&
+					!isApproximatelyEqual(observedSpeed, clampSpeed(desiredSpeed))
 				) {
 					this.queueTransitionRestore(element);
 				}

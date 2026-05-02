@@ -127,6 +127,12 @@
 	border-color: transparent;
 }
 
+.control-icon {
+	width: 16px;
+	height: 16px;
+	display: block;
+}
+
 .ghost-button {
 	padding: 0 12px;
 	white-space: nowrap;
