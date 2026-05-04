@@ -3,12 +3,10 @@
 It's an extension to alter playback speed from video and audio players.
 
 [![Firefox Addon](firefox-get-the-addon.svg)](https://addons.mozilla.org/en-US/firefox/addon/playback-speed-control/)
+[![Chrome Extension](chrome-extension-logo.png)](https://chromewebstore.google.com/detail/playback-speed-control/jkcnhhgibnamchhepnfafgokdaeneibl)
 
 > [!NOTE]
 > This project were built entirely with AI.
-
-> [!IMPORTANT]
-> I didnt publish to Chrome Store, if needed, just clone the project and run `pnpm i; pnpm build; pnpm zip` and in the `.output` folder, drag-and-drop the `.zip` into chrome extension view, with `Developer Mode` enabled.
 
 ## Why I built the extension
 
